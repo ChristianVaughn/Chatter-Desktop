@@ -1,0 +1,24 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+    <title>Chatter</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="center">
+      <div class="card">
+        <img class="logo" src="./icon.svg" alt="" />
+        <h1>Can't reach your Chatter server</h1>
+        <p id="detail"></p>
+        <div class="row">
+          <button type="button" id="change">Change server</button>
+          <button type="button" class="primary" id="retry" autofocus>Try again</button>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="./offline.ts"></script>
+  </body>
+</html>

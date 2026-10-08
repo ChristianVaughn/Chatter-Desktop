@@ -1,0 +1,27 @@
+{
+  "name": "chatter-desktop",
+  "productName": "Chatter",
+  "version": "0.1.0",
+  "description": "Desktop client for Chatter, the self-hosted chat app.",
+  "license": "GPL-3.0-or-later",
+  "private": true,
+  "main": "out/main/index.js",
+  "scripts": {
+    "dev": "electron-vite dev",
+    "build": "electron-vite build",
+    "preview": "electron-vite preview",
+    "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
+    "dist": "electron-vite build && electron-builder",
+    "dist:dir": "electron-vite build && electron-builder --dir",
+    "test:e2e": "playwright test"
+  },
+  "devDependencies": {
+    "@playwright/test": "~1.63.0",
+    "@types/node": "^22.18.0",
+    "electron": "^44.0.0",
+    "electron-builder": "^26.14.0",
+    "electron-vite": "^4.0.1",
+    "typescript": "~5.9.3",
+    "vite": "^7.3.1"
+  }
+}

@@ -1,0 +1,10 @@
+node_modules/
+out/
+dist/
+target/
+*.log
+.env
+.testclient/
+recordings/
+test-results/
+playwright-report/

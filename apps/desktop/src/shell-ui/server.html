@@ -1,0 +1,29 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+    <title>Chatter</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="center">
+      <form class="card" id="form" novalidate>
+        <img class="logo" src="./icon.svg" alt="" />
+        <h1>Connect to a Chatter server</h1>
+        <p>Enter the address you use to open Chatter in your browser.</p>
+        <label>
+          Server address
+          <input id="url" name="url" type="text" inputmode="url" autocomplete="url" spellcheck="false" placeholder="chat.example.com" required autofocus />
+        </label>
+        <div class="error" id="error" role="alert"></div>
+        <div class="row">
+          <button type="button" id="cancel" hidden>Cancel</button>
+          <button type="submit" class="primary" id="submit">Connect</button>
+        </div>
+      </form>
+    </main>
+    <script type="module" src="./server.ts"></script>
+  </body>
+</html>

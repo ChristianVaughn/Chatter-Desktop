@@ -1,0 +1,13 @@
+[package]
+name = "chatter-media"
+description = "Chatter's native media layer: a thin facade over Google libwebrtc (via LiveKit's bindings)."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+# Pinned exactly: the bindings move fast and each release pulls a different
+# prebuilt libwebrtc. Upgrade deliberately.
+libwebrtc = "=0.3.51"
+serde = { version = "1", features = ["derive"] }

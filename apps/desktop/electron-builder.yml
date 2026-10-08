@@ -1,0 +1,44 @@
+appId: com.chatter.desktop
+productName: Chatter
+copyright: Chatter contributors
+directories:
+  output: dist
+  buildResources: build
+files:
+  - out/**
+  - resources/**
+  - package.json
+asarUnpack:
+  - resources/**
+win:
+  target:
+    - target: nsis
+      arch: [x64]
+  executableName: Chatter
+nsis:
+  oneClick: false
+  perMachine: false
+  allowToChangeInstallationDirectory: true
+  createDesktopShortcut: true
+  # The Start Menu shortcut carries the AppUserModelID that Windows toasts need.
+  createStartMenuShortcut: true
+  shortcutName: Chatter
+linux:
+  target:
+    - AppImage
+    - deb
+  category: Network
+  executableName: chatter-desktop
+  synopsis: Desktop client for Chatter
+  maintainer: Chatter contributors
+  desktop:
+    entry:
+      StartupWMClass: Chatter
+deb:
+  depends:
+    - libnotify4
+    - libxtst6
+    - libnss3
+appImage:
+  artifactName: Chatter-${version}-${arch}.AppImage
+publish: null

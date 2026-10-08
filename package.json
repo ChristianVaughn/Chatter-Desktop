@@ -1,0 +1,14 @@
+{
+  "name": "chatter-desktop-workspace",
+  "private": true,
+  "license": "GPL-3.0-or-later",
+  "workspaces": [
+    "apps/*"
+  ],
+  "scripts": {
+    "dev": "npm run dev -w apps/desktop",
+    "build": "npm run build -w apps/desktop",
+    "typecheck": "npm run typecheck -w apps/desktop",
+    "dist": "npm run dist -w apps/desktop"
+  }
+}

@@ -1,0 +1,11 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "chatter-server",
+      "runtimeExecutable": "node",
+      "runtimeArgs": ["scripts/run-chatter-server.mjs"],
+      "port": 8000
+    }
+  ]
+}

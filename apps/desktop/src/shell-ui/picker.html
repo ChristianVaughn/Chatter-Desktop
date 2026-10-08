@@ -1,0 +1,25 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+    <title>Share your screen</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="picker">
+      <h1>Share your screen</h1>
+      <div class="tabs" role="tablist">
+        <button type="button" role="tab" data-kind="screen" aria-selected="true">Screens</button>
+        <button type="button" role="tab" data-kind="window" aria-selected="false">Windows</button>
+      </div>
+      <div class="grid" id="grid" role="listbox" aria-label="Sources"></div>
+      <div class="row">
+        <button type="button" id="cancel">Cancel</button>
+        <button type="button" class="primary" id="share" disabled>Share</button>
+      </div>
+    </main>
+    <script type="module" src="./picker.ts"></script>
+  </body>
+</html>
