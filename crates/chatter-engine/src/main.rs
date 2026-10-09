@@ -47,6 +47,16 @@ fn main() {
         // existing before its transceivers, and those before the offer.
         while let Some(incoming) = rx.recv().await {
             match incoming {
+                // A full process scan takes a while and touches nothing else,
+                // so it runs beside the loop rather than holding up a call.
+                Incoming::Request(req) if req.op == "processes.list" => {
+                    let out = out.clone();
+                    tokio::task::spawn_blocking(move || {
+                        let list =
+                            serde_json::to_value(processes::list()).map_err(|e| e.to_string());
+                        out.respond(req.id, list);
+                    });
+                }
                 Incoming::Request(req) => {
                     let result = engine.handle(&req).await;
                     if let Err(e) = &result {
@@ -62,5 +72,10 @@ fn main() {
                 }
             }
         }
+        // The app closed our stdin: put things back on the way out.
+        drop(engine);
+        log::info!("chatter-engine stopped");
     });
+    // Capture and playout threads would otherwise keep the process alive.
+    std::process::exit(0);
 }

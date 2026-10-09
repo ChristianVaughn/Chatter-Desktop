@@ -138,8 +138,9 @@ pub fn reader(tx: tokio::sync::mpsc::UnboundedSender<Incoming>) {
                     break;
                 }
             }
+            // Dropping `tx` ends the request loop; main then drops the engine,
+            // which puts back anything it changed (ducked volumes) and exits.
             log::info!("stdin closed; shutting down");
-            std::process::exit(0);
         })
         .expect("stdin thread");
 }

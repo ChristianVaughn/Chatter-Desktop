@@ -257,9 +257,13 @@ where
         config,
         move |data: &mut [T], _| {
             for frame in data.chunks_mut(channels) {
-                // Underrun plays silence rather than stale audio.
-                let l = queue.pop().unwrap_or(0.0);
-                let r = queue.pop().unwrap_or(0.0);
+                // Underrun plays silence rather than stale audio, and only
+                // whole pairs are taken so left and right can never swap.
+                let (l, r) = if queue.slots() >= 2 {
+                    (queue.pop().unwrap_or(0.0), queue.pop().unwrap_or(0.0))
+                } else {
+                    (0.0, 0.0)
+                };
                 match frame.len() {
                     1 => frame[0] = T::from_sample((l + r) * 0.5),
                     _ => {
@@ -405,9 +409,12 @@ fn run(shared: Arc<Shared>, apm: SharedApm) {
             None => (&left, &right),
         };
         for (l, r) in l_out.iter().zip(r_out) {
-            if out.queue.push(*l).is_err() || out.queue.push(*r).is_err() {
+            // Whole pairs only, for the same reason.
+            if out.queue.slots() < 2 {
                 break;
             }
+            let _ = out.queue.push(*l);
+            let _ = out.queue.push(*r);
         }
     }
 }

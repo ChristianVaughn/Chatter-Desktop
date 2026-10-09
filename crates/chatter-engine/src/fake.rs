@@ -121,9 +121,16 @@ pub fn start_output(path: &str, mut consumer: rtrb::Consumer<f32>) -> FakeDevice
         while !thread_stop.load(Ordering::Acquire) {
             let due = start.elapsed().as_millis() as u64 * 48 * 2;
             while taken < due {
-                let s = consumer.pop().unwrap_or(0.0);
-                let _ = writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
-                taken += 1;
+                // Whole stereo pairs, or a silent pair when short.
+                let pair = if consumer.slots() >= 2 {
+                    [consumer.pop().unwrap_or(0.0), consumer.pop().unwrap_or(0.0)]
+                } else {
+                    [0.0, 0.0]
+                };
+                for s in pair {
+                    let _ = writer.write_sample((s.clamp(-1.0, 1.0) * i16::MAX as f32) as i16);
+                }
+                taken += 2;
             }
             // Keep the file readable while it grows.
             let _ = writer.flush();

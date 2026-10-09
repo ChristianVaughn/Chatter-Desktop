@@ -203,6 +203,7 @@ fn run(shared: Arc<Shared>, apm: SharedApm, mut sink: FrameSink, mut levels: Lev
     let mut denoised = vec![0f32; SAMPLES_PER_FRAME];
     let mut meter = Meter::new();
     let mut retry_at = Instant::now();
+    let mut apm_for: Option<(bool, bool, bool)> = None;
 
     while !shared.stop.load(Ordering::Acquire) {
         if shared.changed.swap(false, Ordering::AcqRel) {
@@ -213,7 +214,18 @@ fn run(shared: Arc<Shared>, apm: SharedApm, mut sink: FrameSink, mut levels: Lev
             {
                 input = None;
             }
-            *apm.lock() = Some(build_apm(&next));
+            // Rebuilding the processing throws away what the echo canceller
+            // and gain control have learned, so only when they change — not
+            // for every step of the input-volume slider.
+            let processing = (
+                next.echo_cancellation,
+                next.auto_gain_control,
+                next.noise_suppression == "browser",
+            );
+            if apm_for != Some(processing) || apm.lock().is_none() {
+                *apm.lock() = Some(build_apm(&next));
+                apm_for = Some(processing);
+            }
             if next.noise_suppression == "rnnoise" && denoise.is_none() {
                 denoise = Some(nnnoiseless::DenoiseState::new());
                 denoise_warm = false;
