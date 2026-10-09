@@ -57,9 +57,10 @@ appImage:
 protocols:
   - name: Chatter
     schemes: [chatter]
-# Updates come from GitHub Releases once the repository is published; until
-# then the updater finds nothing and stays quiet.
+# Updates come from this repository's GitHub Releases. 0.1.0 was built when it
+# was ChristianVaughn/Chatter-Desktop and finds updates only through GitHub's
+# redirect from that name (see docs/RELEASING.md).
 publish:
   provider: github
-  owner: ChristianVaughn
+  owner: Chatter-Org
   repo: Chatter-Desktop

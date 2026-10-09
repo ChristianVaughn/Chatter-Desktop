@@ -36,9 +36,11 @@ Edit the generated notes on GitHub afterwards to add the platform notes below.
 
 ## Updates
 
-`electron-updater` reads the latest published release of `ChristianVaughn/Chatter-Desktop` (the `publish` block in `electron-builder.yml`); drafts are invisible to it. The installer's name has no spaces (`nsis.artifactName`), since GitHub turns them into dots on upload and `latest.yml` names it with dashes.
+`electron-updater` reads the latest published release of `Chatter-Org/Chatter-Desktop` (the `publish` block in `electron-builder.yml`); drafts are invisible to it. The installer's name has no spaces (`nsis.artifactName`), since GitHub turns them into dots on upload and `latest.yml` names it with dashes.
 
 The app checks at launch and every 6 hours, downloads in the background, and installs on quit. It also offers to restart once an update is ready. People can turn this off in Settings. Development builds and `.deb` installs never update themselves.
+
+**Installs of 0.1.0 look in `ChristianVaughn/Chatter-Desktop`**, the repository's name before it moved to Chatter-Org. They find updates only through GitHub's redirect from the old name, which ends if a repository with that name exists again, a fork included. Don't create one until few people are left on 0.1.0; 0.1.1 and later look in Chatter-Org directly.
 
 ## Signing
 

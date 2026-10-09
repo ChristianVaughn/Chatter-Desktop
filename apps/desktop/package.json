@@ -1,7 +1,7 @@
 {
   "name": "chatter-desktop",
   "productName": "Chatter",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Desktop client for Chatter, the self-hosted chat app.",
   "license": "GPL-3.0-or-later",
   "private": true,
@@ -28,5 +28,5 @@
     "electron-updater": "~6.8.9"
   },
   "author": "Chatter contributors",
-  "homepage": "https://github.com/ChristianVaughn/Chatter-Desktop"
+  "homepage": "https://github.com/Chatter-Org/Chatter-Desktop"
 }
