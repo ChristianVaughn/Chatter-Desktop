@@ -118,4 +118,4 @@ Every phase below is built and tested. See TESTING.md for what each test proves.
 - **Windows 10.** It has no process loopback before build 20348, so the picker offers no audio there.
 - **Antivirus heuristics.** Unsigned executables with keyboard hooks and audio capture look suspicious. Sign both executables.
 - **Churn in LiveKit's bindings.** Mitigation: pin the version exactly and keep all binding code in `chatter-media`.
-- **Ducking after a crash.** If the engine is killed while other apps are turned down, nothing restores them. Windows resets a session's volume when the app restarts.
+- **Ducking that outlives the engine.** Windows and PulseAudio/WirePlumber remember each app's volume, even across a reboot, so a volume left lowered comes back every time that app plays. The engine restores before exiting, including when the OS ends the session (`session_end.rs`). Its journal covers a hard kill or power loss: on the next start it puts back each app that comes back at the volume it was left at. A machine that never starts Chatter again keeps the lowered volumes until the user resets them in the volume mixer.

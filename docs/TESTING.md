@@ -22,7 +22,7 @@ CI (`.github/workflows/ci.yml`) runs the first, third and fourth rows (the shell
 | Test | Proves |
 |---|---|
 | **browser voice** | Chromium's WebRTC in the app is audible (Chromium's own audibility check on the window) and is heard by the other side. |
-| **native voice** | The engine's fake 660 Hz mic is heard by the other side. The engine's recorded speakers contain the other side's 500 Hz tone. Turning "Lower other apps" up ducks other apps while the other side talks and restores them after. |
+| **native voice** | The engine's fake 660 Hz mic is heard by the other side. The engine's recorded speakers contain the other side's 500 Hz tone. Turning "Lower other apps" up ducks while the other side talks and restores after, checked in the engine log. With fake speakers the ducker touches no app, so the test leaves your desktop's volumes alone. |
 | **engine crash** | The engine is killed mid-call. The app restarts it, the client's retries rebuild both connections, and audio flows both ways again. |
 
 ### Setup, once per server

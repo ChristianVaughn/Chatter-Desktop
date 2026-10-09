@@ -34,7 +34,7 @@ mod pulse;
 mod wasapi;
 
 pub use chunk::{CHANNELS, CHUNK_FRAMES, CHUNK_SAMPLES, SAMPLE_RATE};
-pub use duck::{ducking_supported, Ducker};
+pub use duck::{ducking_supported, Ducker, Filter};
 
 /// An application that currently has (or recently had) an audio stream.
 #[derive(Clone, Debug, serde::Serialize)]

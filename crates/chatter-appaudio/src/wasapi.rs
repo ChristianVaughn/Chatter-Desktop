@@ -67,7 +67,7 @@ use windows::Win32::System::Variant::VT_BLOB;
 use windows::Win32::UI::WindowsAndMessaging::GetWindowThreadProcessId;
 
 use crate::chunk::{append_stereo, Chunker, Pacer, SampleFormat, SAMPLE_RATE};
-use crate::duck::{Filter, VolumeBackend};
+use crate::duck::{Filter, Session, VolumeBackend};
 use crate::proc_tree::{
     exclusion_root, parse_window_source_id, title_from_exe, ProcEntry, ProcTable,
 };
@@ -723,7 +723,8 @@ const DUCK_EVENT_CONTEXT: windows::core::GUID =
     windows::core::GUID::from_u128(0x6c1f_3a52_9d0e_4b7a_a3c4_43c8_a7d1_9e25);
 
 /// Session volumes via `ISimpleAudioVolume` (works on any Windows 7+; sessions are keyed by
-/// their instance identifier, which is unique per session and endpoint).
+/// their instance identifier, which is unique per session and endpoint, and belong to the app
+/// their session identifier names).
 ///
 /// The system-sounds session (no owning process) is ducked too: notification dings are just
 /// as distracting during a call.
@@ -744,7 +745,7 @@ impl VolumeBackend for WinVolumes {
         v.first().map(|x| (*x as f32).clamp(0.0, 1.0))
     }
 
-    fn scan(&mut self) -> anyhow::Result<Vec<(String, f32)>> {
+    fn scan(&mut self) -> anyhow::Result<Vec<Session<String, f32>>> {
         let table = snapshot();
         self.controls.clear();
         let mut out = Vec::new();
@@ -763,6 +764,14 @@ impl VolumeBackend for WinVolumes {
                 else {
                     continue;
                 };
+                // Endpoint, executable and grouping, without the process: what Windows keeps
+                // the app's volume under from one run to the next.
+                let app = s
+                    .ctl2
+                    .GetSessionIdentifier()
+                    .ok()
+                    .and_then(|p| take_co_string(p))
+                    .unwrap_or_default();
                 let Ok(vol) = s.ctl.cast::<ISimpleAudioVolume>() else {
                     continue;
                 };
@@ -770,7 +779,11 @@ impl VolumeBackend for WinVolumes {
                     continue;
                 };
                 self.controls.insert(id.clone(), vol);
-                out.push((id, level));
+                out.push(Session {
+                    key: id,
+                    app,
+                    vol: level,
+                });
             }
         }
         Ok(out)

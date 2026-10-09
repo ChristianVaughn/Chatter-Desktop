@@ -2,7 +2,7 @@
 
 The desktop app's native media process (`crates/chatter-engine`). The app starts it before the window opens, talks to it over stdin/stdout, and restarts it if it crashes. It logs to stderr; the app copies that to `<profile>/logs/engine.log`.
 
-To stop it, the app closes its stdin. The engine then puts back what it changed (other apps' ducked volume) and exits; the app kills it only if that takes more than 1.5 s. In development the app runs whichever of `target/release` and `target/debug` was built last.
+To stop it, the app closes its stdin. The engine then puts back what it changed (other apps' ducked volume) and exits; the app kills it only if that takes more than 1.5 s. A shutdown, restart or sign-out skips the app's quit, so the engine also puts things back on its own: on `WM_ENDSESSION` on Windows, and on SIGTERM, SIGHUP or SIGINT on Linux (`session_end.rs`). In development the app runs whichever of `target/release` and `target/debug` was built last.
 
 ## What it does
 
@@ -14,7 +14,7 @@ To stop it, the app closes its stdin. The engine then puts back what it changed 
 | Devices | `devices.rs` | cpal `host:id` ids, `"default"` follows the system. Polled for changes every 2 s. |
 | Push-to-talk | `chatter-hotkeys` | Watches one key or mouse button system-wide and reports press and release; never consumes input. Windows: low-level hooks, matched by scancode. X11: XInput2 raw events. Wayland: GlobalShortcuts portal. |
 | App audio | `chatter-appaudio` | Per-app capture for screen sharing. Windows 11 / Server 2022+: process loopback (include the app's tree, or exclude Chatter's). Linux: PulseAudio/PipeWire per-sink-input monitors. |
-| Ducking | `chatter-appaudio` | Turns other apps' session/stream volume down while the call is audible, and restores it afterwards. While anything is turned down it keeps a journal (`chatter-ducking.json` in the profile), so if the engine is killed the next start puts those apps back, unless the user has changed them since. |
+| Ducking | `chatter-appaudio` | Turns other apps' session/stream volume down while the call is audible, and restores it afterwards. Sessions are tied to their app as the OS remembers volumes (Windows: the session identifier; Linux: the application name), because a lowered volume comes back with the app, even after a reboot. A session that ends while lowered, or one the engine was killed before restoring, stays pending in a journal (`chatter-ducking.json` in the profile). Over the next week, an app that returns at the volume it was left at is put back, and one at any other volume is left alone. With fake speakers (tests), ducking touches no app. |
 | Programs | `processes.rs` | Windowed programs (Windows) or the user's own (Linux), for game activity and "add a game". |
 | Test devices | `fake.rs` | `CHATTER_ENGINE_FAKE_INPUT=tone:<hz>\|<wav>` and `CHATTER_ENGINE_FAKE_OUTPUT=<wav>` replace the mic and speakers in real time. |
 

@@ -28,7 +28,7 @@ sysinfo = { version = "0.38", default-features = false, features = ["system"] }
 tokio = { version = "1", features = ["full"] }
 
 [target.'cfg(windows)'.dependencies]
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_Graphics_Gdi", "Win32_System_LibraryLoader", "Win32_UI_WindowsAndMessaging"] }
 
 # Linux: PulseAudio (which PipeWire also serves) rather than raw ALSA, so the
 # default device follows the desktop's choice. Needs libpulse-dev to build.

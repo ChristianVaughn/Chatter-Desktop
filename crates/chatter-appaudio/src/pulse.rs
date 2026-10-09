@@ -40,7 +40,7 @@ use pulse::stream::{FlagSet as StreamFlags, PeekResult, State as StreamState, St
 use pulse::volume::{ChannelVolumes, Volume, VolumeLinear};
 
 use crate::chunk::{clamp, Ticker, CHUNK_SAMPLES, SAMPLE_RATE};
-use crate::duck::{Filter, VolumeBackend};
+use crate::duck::{Filter, Session, VolumeBackend};
 use crate::proc_tree::{parse_proc_stat, title_from_exe, ProcEntry, ProcTable};
 use crate::{AudioApp, Capabilities, Capture, OnAudio, Target};
 
@@ -721,13 +721,19 @@ impl VolumeBackend for PulseVolumes {
         out.is_valid().then_some(out)
     }
 
-    fn scan(&mut self) -> anyhow::Result<Vec<(u32, ChannelVolumes)>> {
+    fn scan(&mut self) -> anyhow::Result<Vec<Session<u32, ChannelVolumes>>> {
         let (inputs, _) = self.ensure_conn()?.list()?;
         let table = snapshot();
         Ok(inputs
             .into_iter()
             .filter(|si| si.volume_writable && self.filter.allows(si.pid, &table))
-            .map(|si| (si.index, si.volume))
+            .map(|si| Session {
+                key: si.index,
+                // What stream-restore (PulseAudio) and restore-stream (WirePlumber) remember
+                // the volume by.
+                app: si.app_name.or(si.binary).unwrap_or_default(),
+                vol: si.volume,
+            })
             .collect())
     }
 

@@ -6,7 +6,7 @@ use crate::devices;
 use crate::peers::{IceServerArg, Peers};
 use crate::playout::{Playout, Position};
 use crate::protocol::{Out, Request};
-use chatter_appaudio::{AppAudioCapture, Ducker, Target};
+use chatter_appaudio::{AppAudioCapture, Ducker, Filter, Target};
 use chatter_hotkeys::{Backend, Binding, HotkeyWatcher};
 use chatter_media::libwebrtc::{
     audio_source::native::NativeAudioSource, audio_stream::native::NativeAudioStream, prelude::*,
@@ -83,7 +83,17 @@ impl Ducking {
         // Never our own sound: the engine, and the app that started it.
         let mut own = vec![std::process::id()];
         own.extend(crate::processes::parent_pid());
-        self.ducker = Some(Ducker::new(own, Some(ducking_journal())));
+        // With fake speakers (tests) the call isn't audible, and a test mustn't turn the
+        // developer's desktop down: duck nothing.
+        let only = crate::fake::output().map(|_| Vec::new());
+        let filter = Filter { exclude: own, only };
+        self.ducker = Some(Ducker::with_filter(filter, Some(ducking_journal())));
+    }
+
+    /// Puts other apps back now (dropping the ducker restores synchronously) and stays off.
+    fn stop(&mut self) {
+        self.amount = 0.0;
+        self.ducker = None;
     }
 
     fn apply(&mut self) {
@@ -137,6 +147,14 @@ impl Engine {
             next_stream: 1,
             ducking: Arc::new(parking_lot::Mutex::new(Ducking::recovering())),
         }
+    }
+
+    /// Puts other apps' volume back, returning once it's done, and leaves ducking off: for
+    /// when the process is about to end without the engine being dropped. Safe to call from
+    /// any thread, and more than once.
+    pub fn ducking_stopper(&self) -> impl Fn() + Send + Sync + 'static {
+        let ducking = self.ducking.clone();
+        move || ducking.lock().stop()
     }
 
     pub fn hello(&self) -> Value {

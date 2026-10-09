@@ -15,6 +15,7 @@ mod playout;
 mod processes;
 mod protocol;
 mod resample;
+mod session_end;
 
 use protocol::Incoming;
 
@@ -42,6 +43,8 @@ fn main() {
 
         let watch_out = out.clone();
         devices::watch(move || watch_out.event("devices.changed", serde_json::json!({})));
+        session_end::watch(engine.ducking_stopper());
+        let stop_ducking = engine.ducking_stopper();
 
         // One request at a time, in arrival order: the app depends on a peer
         // existing before its transceivers, and those before the offer.
@@ -72,8 +75,11 @@ fn main() {
                 }
             }
         }
-        // The app closed our stdin: put things back on the way out.
+        // The app closed our stdin: put things back on the way out. The session-end watcher
+        // shares the ducking state, so it outlives the engine: restore it here, which also
+        // waits for the watcher if it is restoring right now.
         drop(engine);
+        stop_ducking();
         log::info!("chatter-engine stopped");
     });
     // Capture and playout threads would otherwise keep the process alive.

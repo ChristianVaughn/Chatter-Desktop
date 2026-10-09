@@ -16,21 +16,29 @@
 //! `set` call, ~1 s while ducked, plus change notifications on Linux) and right before
 //! restoring; no OS event sinks are needed.
 //!
-//! Crash safety: while anything is ducked, the managed sessions (original volume and what we
-//! last set) are kept in a small journal file. If the process dies before restoring, the next
-//! [`Ducker`] given the same journal puts back every session that still exists and still has
-//! the volume we left it at; a session the user has changed since, or one that has gone, is
-//! left alone. A clean drop restores synchronously and removes the journal.
+//! Lowered volumes must not outlive the duck. Windows (per app) and PulseAudio/WirePlumber
+//! (per application) remember a volume and give it back the next time that app plays, even
+//! after a reboot. So every session is also tied to its *app*: the identity the OS remembers
+//! the volume by. A lowered session we can't put back (it ended while ducked, or the process
+//! died before restoring) becomes *pending* for its app: when that app shows up again at the
+//! volume we left it at, it is put back to its original; at any other volume someone else has
+//! set it since, and it is left alone. A new session that comes up at the lowered volume of
+//! a ducked sibling of the same app takes that sibling's original, not the lowered value.
+//!
+//! Crash safety: the managed and pending sessions are kept in a small journal file while
+//! there are any. The next [`Ducker`] given the same journal takes them over as pending, so a
+//! process killed while ducked (including by a shutdown) is undone on the next start, for
+//! apps that are running then and for those that start later. Pending apps are watched for a
+//! week at most. A clean drop restores synchronously and leaves only what is still pending.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
 use std::path::PathBuf;
-use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 #[cfg(any(windows, target_os = "linux", test))]
 use crate::proc_tree::ProcTable;
@@ -43,6 +51,10 @@ pub const RESTORE_RAMP: Duration = Duration::from_millis(300);
 const RAMP_TICK: Duration = Duration::from_millis(10);
 /// Re-scan interval while ducked (new sessions get ducked, user changes are noticed).
 const RESCAN_EVERY: Duration = Duration::from_secs(1);
+/// While apps a previous duck left lowered are outstanding, how often to look for them.
+const PENDING_POLL: Duration = Duration::from_secs(2);
+/// How long to keep waiting for such an app to come back.
+const PENDING_TTL: Duration = Duration::from_secs(7 * 24 * 60 * 60);
 
 /// A smoothstep gain ramp.
 #[derive(Clone, Copy, Debug)]
@@ -126,16 +138,24 @@ impl Filter {
     }
 }
 
+/// A session/stream as a backend lists it.
+pub(crate) struct Session<K, V> {
+    pub key: K,
+    /// The app it belongs to as the OS remembers volumes: stable across restarts and reboots,
+    /// unlike `key`. Empty when unknown.
+    pub app: String,
+    pub vol: V,
+}
+
 /// Platform access to per-application volumes.
 pub(crate) trait VolumeBackend {
-    /// Written to the crash journal as a string, so it must survive `to_string`/`parse`.
-    type Key: Eq + Hash + Clone + Debug + ToString + FromStr;
+    type Key: Eq + Hash + Clone + Debug;
     type Vol: Clone + Debug;
     /// A volume as plain numbers for the crash journal, and back.
     fn vol_to_vec(v: &Self::Vol) -> Vec<f64>;
     fn vol_from_vec(v: &[f64]) -> Option<Self::Vol>;
     /// Every session/stream we may touch (filter applied) with its current volume.
-    fn scan(&mut self) -> anyhow::Result<Vec<(Self::Key, Self::Vol)>>;
+    fn scan(&mut self) -> anyhow::Result<Vec<Session<Self::Key, Self::Vol>>>;
     /// `original` scaled by `factor` (0..=1). Must return `original` unchanged for 1.0.
     fn scaled(original: &Self::Vol, factor: f32) -> Self::Vol;
     /// Whether two volumes are equal within the backend's rounding.
@@ -155,14 +175,31 @@ pub(crate) trait VolumeBackend {
 }
 
 struct Managed<V> {
+    app: String,
     original: V,
     last_set: V,
+}
+
+/// An app left at a lowered volume we couldn't put back, waiting for it to show up again.
+struct Pending<V> {
+    original: V,
+    last_set: V,
+    /// When it was left lowered, in seconds since the Unix epoch.
+    since: u64,
+}
+
+fn now_secs() -> u64 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |d| d.as_secs())
 }
 
 /// The ducking state machine, driven by [`run`].
 pub(crate) struct DuckState<B: VolumeBackend> {
     sessions: HashMap<B::Key, Managed<B::Vol>>,
-    /// Where the managed sessions are recorded while ducked (see the module docs).
+    /// Apps left lowered, by app (see the module docs).
+    pending: HashMap<String, Pending<B::Vol>>,
+    /// Where the managed and pending sessions are recorded (see the module docs).
     journal: Option<PathBuf>,
     /// The sessions changed since the journal was last written.
     journal_stale: bool,
@@ -177,6 +214,7 @@ impl<B: VolumeBackend> DuckState<B> {
     pub fn new(now: Instant) -> Self {
         DuckState {
             sessions: HashMap::new(),
+            pending: HashMap::new(),
             journal: None,
             journal_stale: false,
             released: HashSet::new(),
@@ -186,8 +224,8 @@ impl<B: VolumeBackend> DuckState<B> {
         }
     }
 
-    /// Reads current volumes: releases sessions the user changed, forgets vanished ones and,
-    /// if `adopt`, starts managing new ones.
+    /// Reads current volumes: releases sessions the user changed, puts back pending apps that
+    /// came back, moves vanished sessions to pending and, if `adopt`, starts managing new ones.
     fn rescan(&mut self, b: &mut B, adopt: bool) {
         self.last_scan = Some(Instant::now());
         let current = match b.scan() {
@@ -198,7 +236,8 @@ impl<B: VolumeBackend> DuckState<B> {
             }
         };
         let mut present = HashSet::with_capacity(current.len());
-        for (key, vol) in current {
+        let mut settled = HashSet::new();
+        for Session { key, app, vol } in current {
             present.insert(key.clone());
             if let Some(m) = self.sessions.get(&key) {
                 if !B::same(&vol, &m.last_set) {
@@ -209,21 +248,85 @@ impl<B: VolumeBackend> DuckState<B> {
                     self.released.insert(key);
                     self.journal_stale = true;
                 }
-            } else if adopt && !self.released.contains(&key) {
+                continue;
+            }
+            if self.released.contains(&key) {
+                continue;
+            }
+            // Back at the volume a previous duck left it at: its real volume is the original.
+            // At any other volume, someone has set it since and it's theirs.
+            let left_low = self.pending.get(&app).and_then(|p| {
+                settled.insert(app.clone());
+                B::same(&vol, &p.last_set).then(|| p.original.clone())
+            });
+            if !adopt {
+                if let Some(original) = left_low {
+                    if b.set(&key, &original) {
+                        log::info!("appaudio: put back {app}, which a previous duck left lowered");
+                    }
+                }
+                continue;
+            }
+            // A new session of a ducked app can start at the volume we gave its sibling (the
+            // OS remembers it per app); that isn't its own.
+            let original = left_low
+                .or_else(|| self.lowered_sibling(&app, &vol))
+                .unwrap_or_else(|| vol.clone());
+            self.journal_stale = true;
+            self.sessions.insert(
+                key,
+                Managed {
+                    app,
+                    original,
+                    last_set: vol,
+                },
+            );
+        }
+        let gone: Vec<B::Key> = self
+            .sessions
+            .keys()
+            .filter(|k| !present.contains(*k))
+            .cloned()
+            .collect();
+        for key in gone {
+            if let Some(m) = self.sessions.remove(&key) {
                 self.journal_stale = true;
-                self.sessions.insert(
-                    key,
-                    Managed {
-                        original: vol.clone(),
-                        last_set: vol,
-                    },
-                );
+                self.leave_pending(m);
             }
         }
-        let before = self.sessions.len();
-        self.sessions.retain(|k, _| present.contains(k));
-        self.journal_stale |= self.sessions.len() != before;
         self.released.retain(|k| present.contains(k));
+        let expired = now_secs().saturating_sub(PENDING_TTL.as_secs());
+        let before = self.pending.len();
+        self.pending
+            .retain(|app, p| !settled.contains(app) && p.since > expired);
+        self.journal_stale |= self.pending.len() != before;
+    }
+
+    /// The original of a managed session of `app` that we lowered to `vol`.
+    fn lowered_sibling(&self, app: &str, vol: &B::Vol) -> Option<B::Vol> {
+        if app.is_empty() {
+            return None;
+        }
+        self.sessions
+            .values()
+            .find(|m| {
+                m.app == app && B::same(vol, &m.last_set) && !B::same(&m.original, &m.last_set)
+            })
+            .map(|m| m.original.clone())
+    }
+
+    /// Remembers a session we couldn't put back, if we left it lowered, so its app is put
+    /// back when it shows up again.
+    fn leave_pending(&mut self, m: Managed<B::Vol>) {
+        if m.app.is_empty() || B::same(&m.original, &m.last_set) {
+            return;
+        }
+        self.journal_stale = true;
+        self.pending.entry(m.app).or_insert(Pending {
+            original: m.original,
+            last_set: m.last_set,
+            since: now_secs(),
+        });
     }
 
     /// Sets every managed session to `original × factor`.
@@ -237,41 +340,51 @@ impl<B: VolumeBackend> DuckState<B> {
         }
     }
 
-    /// Puts every managed session back to exactly its original and forgets them all.
+    /// Puts every managed session back to exactly its original and forgets them all; one that
+    /// can't be set any more is left pending.
     fn restore(&mut self, b: &mut B) {
-        if self.sessions.is_empty() {
-            self.released.clear();
-            return;
-        }
-        self.rescan(b, false); // don't overwrite a change the user made since the last scan
-        for (key, m) in self.sessions.iter() {
-            if !B::same(&m.original, &m.last_set) {
-                b.set(key, &m.original);
+        if !self.sessions.is_empty() {
+            self.rescan(b, false); // don't overwrite a change the user made since the last scan
+            for (key, m) in std::mem::take(&mut self.sessions) {
+                if !B::same(&m.original, &m.last_set) && !b.set(&key, &m.original) {
+                    self.leave_pending(m);
+                }
             }
+            b.flush();
+            self.journal_stale = true;
         }
-        b.flush();
-        self.sessions.clear();
         self.released.clear();
-        self.write_journal();
+        if self.journal_stale {
+            self.write_journal();
+        }
     }
 
-    /// Records the managed sessions, or removes the journal when there are none.
+    /// Records the managed and pending sessions, or removes the journal when there are none.
     fn write_journal(&mut self) {
         self.journal_stale = false;
         let Some(path) = &self.journal else { return };
-        if self.sessions.is_empty() {
+        let now = now_secs();
+        let managed = self
+            .sessions
+            .values()
+            .filter(|m| !m.app.is_empty())
+            .map(|m| JournalEntry {
+                app: m.app.clone(),
+                original: B::vol_to_vec(&m.original),
+                last_set: B::vol_to_vec(&m.last_set),
+                since: now,
+            });
+        let pending = self.pending.iter().map(|(app, p)| JournalEntry {
+            app: app.clone(),
+            original: B::vol_to_vec(&p.original),
+            last_set: B::vol_to_vec(&p.last_set),
+            since: p.since,
+        });
+        let entries: Vec<JournalEntry> = managed.chain(pending).collect();
+        if entries.is_empty() {
             let _ = std::fs::remove_file(path);
             return;
         }
-        let entries: Vec<JournalEntry> = self
-            .sessions
-            .iter()
-            .map(|(key, m)| JournalEntry {
-                key: key.to_string(),
-                original: B::vol_to_vec(&m.original),
-                last_set: B::vol_to_vec(&m.last_set),
-            })
-            .collect();
         // Written beside and renamed over, so a crash mid-write leaves the old journal.
         let tmp = path.with_extension("tmp");
         let written = serde_json::to_vec(&entries)
@@ -283,41 +396,39 @@ impl<B: VolumeBackend> DuckState<B> {
         }
     }
 
-    /// Puts back what a previous run left ducked (see the module docs).
+    /// Takes over what a previous run left lowered as pending, and puts back the apps that are
+    /// running now (see the module docs).
     fn recover(&mut self, b: &mut B) {
         let Some(path) = &self.journal else { return };
         let Ok(text) = std::fs::read(path) else {
             return;
         };
         let entries: Vec<JournalEntry> = serde_json::from_slice(&text).unwrap_or_default();
-        let current: HashMap<String, B::Vol> = match b.scan() {
-            Ok(c) => c.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
-            Err(e) => {
-                log::warn!("appaudio: can't check what a previous run ducked: {e:#}");
-                return;
-            }
-        };
-        let mut restored = 0;
         for entry in entries {
-            let (Some(original), Some(last_set), Ok(key)) = (
+            let (Some(original), Some(last_set)) = (
                 B::vol_from_vec(&entry.original),
                 B::vol_from_vec(&entry.last_set),
-                entry.key.parse::<B::Key>(),
             ) else {
                 continue;
             };
-            let untouched = current
-                .get(&entry.key)
-                .is_some_and(|v| B::same(v, &last_set));
-            if untouched && b.set(&key, &original) {
-                restored += 1;
+            if entry.app.is_empty() || B::same(&original, &last_set) {
+                continue;
             }
+            self.pending.entry(entry.app).or_insert(Pending {
+                original,
+                last_set,
+                since: entry.since,
+            });
         }
+        if !self.pending.is_empty() {
+            log::info!(
+                "appaudio: a previous run left {} app(s) lowered; putting them back as they appear",
+                self.pending.len()
+            );
+        }
+        self.rescan(b, false);
         b.flush();
-        if restored > 0 {
-            log::info!("appaudio: restored {restored} app volume(s) a previous run left lowered");
-        }
-        let _ = std::fs::remove_file(path);
+        self.write_journal();
     }
 
     fn command(&mut self, b: &mut B, level: Option<f32>, now: Instant) {
@@ -335,10 +446,14 @@ impl<B: VolumeBackend> DuckState<B> {
     /// One iteration after a command or timeout.
     fn tick(&mut self, b: &mut B, now: Instant) {
         let ramping = self.ramp.active(now);
-        if self.target.is_some() && !ramping {
-            let due = self.last_scan.is_none_or(|t| t.elapsed() >= RESCAN_EVERY);
-            if b.take_dirty() || due {
-                self.rescan(b, true);
+        if !ramping {
+            let since_scan = self.last_scan.map(|t| t.elapsed());
+            if self.target.is_some() {
+                if b.take_dirty() || since_scan.is_none_or(|e| e >= RESCAN_EVERY) {
+                    self.rescan(b, true);
+                }
+            } else if !self.pending.is_empty() && since_scan.is_none_or(|e| e >= PENDING_POLL) {
+                self.rescan(b, false);
             }
         }
         self.apply(b, self.ramp.value(now));
@@ -355,6 +470,8 @@ impl<B: VolumeBackend> DuckState<B> {
             Some(RAMP_TICK)
         } else if self.target.is_some() {
             Some(b.poll_interval())
+        } else if !self.pending.is_empty() {
+            Some(PENDING_POLL)
         } else {
             None
         }
@@ -363,9 +480,11 @@ impl<B: VolumeBackend> DuckState<B> {
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct JournalEntry {
-    key: String,
+    app: String,
     original: Vec<f64>,
     last_set: Vec<f64>,
+    /// When it was lowered, in seconds since the Unix epoch.
+    since: u64,
 }
 
 pub(crate) enum Cmd {
@@ -435,7 +554,8 @@ impl Ducker {
         )
     }
 
-    pub(crate) fn with_filter(filter: Filter, journal: Option<PathBuf>) -> Ducker {
+    /// A ducker that touches only what `filter` allows.
+    pub fn with_filter(filter: Filter, journal: Option<PathBuf>) -> Ducker {
         let (tx, rx) = mpsc::channel();
         let thread = spawn_backend(filter, journal, rx);
         Ducker {
@@ -548,11 +668,25 @@ mod tests {
         assert!(!done.active(t0));
     }
 
-    /// In-memory backend for exercising the state machine.
+    /// In-memory backend for exercising the state machine. Session `k` belongs to app
+    /// `apps[k]`, else to its own app "app{k}".
     #[derive(Default)]
     struct Fake {
         vols: HashMap<u32, f32>,
+        apps: HashMap<u32, String>,
         sets: usize,
+    }
+
+    impl Fake {
+        /// Session `key` of `app` at `vol`.
+        fn open(&mut self, key: u32, app: &str, vol: f32) {
+            self.apps.insert(key, app.into());
+            self.vols.insert(key, vol);
+        }
+
+        fn close(&mut self, key: u32) {
+            self.vols.remove(&key);
+        }
     }
 
     impl VolumeBackend for Fake {
@@ -564,8 +698,20 @@ mod tests {
         fn vol_from_vec(v: &[f64]) -> Option<f32> {
             v.first().map(|x| *x as f32)
         }
-        fn scan(&mut self) -> anyhow::Result<Vec<(u32, f32)>> {
-            Ok(self.vols.iter().map(|(k, v)| (*k, *v)).collect())
+        fn scan(&mut self) -> anyhow::Result<Vec<Session<u32, f32>>> {
+            Ok(self
+                .vols
+                .iter()
+                .map(|(k, v)| Session {
+                    key: *k,
+                    app: self
+                        .apps
+                        .get(k)
+                        .cloned()
+                        .unwrap_or_else(|| format!("app{k}")),
+                    vol: *v,
+                })
+                .collect())
         }
         fn scaled(o: &f32, f: f32) -> f32 {
             o * f
@@ -658,6 +804,108 @@ mod tests {
         st.tick(&mut b, t0 + ms(700));
         assert_eq!(b.vols[&1], 1.0);
         assert!(!journal.exists());
+    }
+
+    #[test]
+    fn a_shutdown_while_ducked_is_undone_as_apps_return() {
+        let journal = journal_path("reboot");
+        let _ = std::fs::remove_file(&journal);
+        let mut b = Fake::default();
+        b.open(1, "player", 0.8);
+        b.open(2, "game", 0.5);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.journal = Some(journal.clone());
+        st.command(&mut b, Some(0.25), t0);
+        st.tick(&mut b, t0 + ms(200));
+        drop(st); // the machine shuts down with both ducked
+
+        // After the reboot the OS gives each app the volume it last had, in new sessions,
+        // and only the player has started yet.
+        let mut b = Fake::default();
+        b.open(11, "player", 0.2);
+        let mut next = DuckState::<Fake>::new(Instant::now());
+        next.journal = Some(journal.clone());
+        next.recover(&mut b);
+        assert_eq!(b.vols[&11], 0.8, "running app put back");
+        assert!(journal.exists(), "still waiting for the game");
+        assert!(
+            next.timeout(&b, Instant::now()).is_some(),
+            "and watching for it"
+        );
+
+        b.open(12, "game", 0.125);
+        next.last_scan = None;
+        next.tick(&mut b, Instant::now());
+        assert_eq!(b.vols[&12], 0.5, "put back once it starts");
+        assert!(!journal.exists());
+        assert_eq!(
+            next.timeout(&b, Instant::now()),
+            None,
+            "nothing left to watch"
+        );
+    }
+
+    #[test]
+    fn an_app_that_quits_while_ducked_is_put_back_when_it_returns() {
+        let mut b = Fake::default();
+        b.open(1, "player", 0.8);
+        b.open(2, "game", 0.5);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.command(&mut b, Some(0.25), t0);
+        st.tick(&mut b, t0 + ms(200));
+        b.close(2); // the OS keeps the game's lowered volume for next time
+        st.last_scan = None;
+        st.tick(&mut b, t0 + ms(1300));
+        st.command(&mut b, None, t0 + ms(1400));
+        st.tick(&mut b, t0 + ms(1800));
+        assert_eq!(b.vols[&1], 0.8);
+
+        b.open(3, "game", 0.125);
+        st.last_scan = None;
+        st.tick(&mut b, t0 + ms(5000));
+        assert_eq!(b.vols[&3], 0.5);
+        assert!(st.pending.is_empty());
+    }
+
+    #[test]
+    fn a_returning_app_someone_else_has_set_is_left_alone() {
+        let mut b = Fake::default();
+        b.open(1, "game", 0.5);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.command(&mut b, Some(0.25), t0);
+        st.tick(&mut b, t0 + ms(200));
+        b.close(1);
+        st.command(&mut b, None, t0 + ms(300));
+        st.tick(&mut b, t0 + ms(700));
+        assert!(!st.pending.is_empty());
+
+        b.open(2, "game", 0.7);
+        st.last_scan = None;
+        st.tick(&mut b, t0 + ms(5000));
+        assert_eq!(b.vols[&2], 0.7);
+        assert!(st.pending.is_empty(), "no longer ours to put back");
+    }
+
+    #[test]
+    fn a_new_stream_at_its_siblings_ducked_volume_keeps_the_real_one() {
+        let mut b = Fake::default();
+        b.open(1, "browser", 0.8);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.command(&mut b, Some(0.25), t0);
+        st.tick(&mut b, t0 + ms(200));
+        // A second stream starts at the volume the OS now remembers for the browser.
+        b.open(2, "browser", 0.2);
+        st.last_scan = None;
+        st.tick(&mut b, t0 + ms(1300));
+        assert_eq!(b.vols[&2], 0.2, "not ducked a second time");
+        st.command(&mut b, None, t0 + ms(1400));
+        st.tick(&mut b, t0 + ms(1800));
+        assert_eq!(b.vols[&1], 0.8);
+        assert_eq!(b.vols[&2], 0.8, "restored to the browser's volume, not 0.2");
     }
 
     #[test]
