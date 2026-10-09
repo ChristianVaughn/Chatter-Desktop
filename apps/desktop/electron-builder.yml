@@ -21,6 +21,8 @@ win:
       arch: [x64]
   executableName: Chatter
 nsis:
+  # No spaces: GitHub turns them into dots on upload, and latest.yml expects dashes.
+  artifactName: Chatter-Setup-${version}.${ext}
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true

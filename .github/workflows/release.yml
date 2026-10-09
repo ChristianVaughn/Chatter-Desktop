@@ -1,0 +1,83 @@
+name: Release
+
+# `git tag v1.2.3 && git push origin v1.2.3` publishes release v1.2.3 from the
+# installers CI already built and tested for that commit on main. Nothing is
+# rebuilt. If CI is still running for it, this waits.
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write # create the release
+  actions: read # find and download CI's build
+
+jobs:
+  release:
+    name: Publish ${{ github.ref_name }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      GH_TOKEN: ${{ github.token }}
+      GH_REPO: ${{ github.repository }}
+      TAG: ${{ github.ref_name }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: apps/desktop/package.json
+          sparse-checkout-cone-mode: false
+
+      - name: Tag matches the app version
+        id: version
+        run: |
+          version=$(node -p "require('./apps/desktop/package.json').version")
+          if [ "$TAG" != "v$version" ]; then
+            echo "::error::$TAG doesn't match the version in apps/desktop/package.json ($version) at this commit. Tag the commit that bumps it to ${TAG#v}."
+            exit 1
+          fi
+          echo "version=$version" >> "$GITHUB_OUTPUT"
+
+      - name: Find this commit's CI build
+        id: ci
+        run: |
+          # The tag usually goes up right behind the commit, so CI may not
+          # have been queued yet: look for a couple of minutes.
+          for _ in $(seq 1 12); do
+            run=$(gh run list --workflow ci.yml --event push --commit "$GITHUB_SHA" \
+              --limit 1 --json databaseId --jq '.[0].databaseId // empty')
+            [ -n "$run" ] && break
+            sleep 10
+          done
+          if [ -z "$run" ]; then
+            echo "::error::CI never built $GITHUB_SHA on main. Push the commit to main first; once CI has built it, re-run this workflow."
+            exit 1
+          fi
+          echo "CI run: $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/actions/runs/$run"
+          echo "run=$run" >> "$GITHUB_OUTPUT"
+
+      - name: Wait for it to pass
+        run: |
+          if ! gh run watch "${{ steps.ci.outputs.run }}" --exit-status --interval 30 > /dev/null; then
+            echo "::error::CI failed for $GITHUB_SHA, so there is nothing to release. Fix it, push, and tag the fixed commit."
+            exit 1
+          fi
+
+      - name: Download its installers
+        run: |
+          if ! gh run download "${{ steps.ci.outputs.run }}" --dir release; then
+            echo "::error::Couldn't download CI's build (artifacts expire after 14 days). Re-run that CI run, then re-run this workflow."
+            exit 1
+          fi
+          ls -R release
+
+      - name: Publish
+        run: |
+          mapfile -t files < <(find release -type f)
+          if gh release view "$TAG" > /dev/null 2>&1; then
+            # A re-run after a partial upload: fill in what's missing.
+            gh release upload "$TAG" "${files[@]}" --clobber
+          else
+            gh release create "$TAG" "${files[@]}" --verify-tag \
+              --title "Chatter ${{ steps.version.outputs.version }}" --generate-notes
+          fi
+          echo "Published $GITHUB_SERVER_URL/$GITHUB_REPOSITORY/releases/tag/$TAG" >> "$GITHUB_STEP_SUMMARY"

@@ -72,7 +72,8 @@ jobs:
         working-directory: apps/desktop
 
       # Installers people can try straight from the run: the NSIS setup on
-      # Windows, the AppImage and .deb on Linux. Never published from here.
+      # Windows, the AppImage and .deb on Linux. Plus what the auto-updater
+      # reads (latest*.yml, blockmaps), which release.yml publishes from here.
       - name: Package
         run: npx electron-builder --publish never
         working-directory: apps/desktop
@@ -86,5 +87,7 @@ jobs:
             apps/desktop/dist/*.exe
             apps/desktop/dist/*.AppImage
             apps/desktop/dist/*.deb
+            apps/desktop/dist/*.blockmap
+            apps/desktop/dist/latest*.yml
           if-no-files-found: error
           retention-days: 14
