@@ -12,6 +12,9 @@ export const IPC = {
   pickerGetSources: "picker:get-sources",
   pickerChoose: "picker:choose",
   keybindDone: "keybind:done",
+  settingsGet: "settings:get",
+  settingsSet: "settings:set",
+  runningApps: "settings:running-apps",
   // Remote pages (served by the user's Chatter server)
   remoteFocus: "remote:focus",
   engineRequest: "engine:request",
@@ -19,6 +22,11 @@ export const IPC = {
   pttGet: "ptt:get",
   pttCapture: "ptt:capture",
   pttClear: "ptt:clear",
+  appAudioClaim: "appaudio:claim",
+  gameCurrent: "game:current",
+  duckingGet: "ducking:get",
+  duckingSet: "ducking:set",
+  engineAudio: "engine:audio",
 } as const;
 
 export type PreloadRole =
@@ -31,6 +39,25 @@ export interface ProbeResult {
   /** Normalised origin, e.g. "https://chat.example.com". */
   origin?: string;
   error?: string;
+}
+
+/** The audio to go with a screen share, as chosen in the picker. */
+export interface AudioChoice {
+  kind: "none" | "window" | "app" | "system";
+  pid?: number;
+}
+
+export interface PickerData {
+  sources: CaptureSource[];
+  /** Null when this machine can't capture app audio (no engine, or Windows
+   *  before 10 build 20348). */
+  audio: {
+    perApp: boolean;
+    allExcept: boolean;
+    /** A shared window can be traced to its app (Windows). */
+    windowApp: boolean;
+    apps: { pid: number; name: string }[];
+  } | null;
 }
 
 export interface CaptureSource {
@@ -50,6 +77,16 @@ export interface BridgeInfo {
   features: string[];
 }
 
+/** The desktop preferences as the Settings window sees them. */
+export interface DesktopPrefsView {
+  startWithSystem: boolean;
+  startMinimized: boolean;
+  shareGameActivity: boolean;
+  extraGames: { exe: string; name: string }[];
+  autoUpdate: boolean;
+  appVersion: string;
+}
+
 /** API the preload exposes to the shell's own pages as `window.shellApi`. */
 export interface ShellApi {
   getServer(): Promise<string | null>;
@@ -57,7 +94,10 @@ export interface ShellApi {
   setServer(origin: string): Promise<void>;
   retryServer(): Promise<void>;
   changeServer(): Promise<void>;
-  pickerGetSources(): Promise<CaptureSource[]>;
-  pickerChoose(id: string | null): Promise<void>;
+  pickerGetSources(): Promise<PickerData>;
+  pickerChoose(id: string | null, audio?: AudioChoice): Promise<void>;
   keybindDone(code: string | null): Promise<void>;
+  settingsGet(): Promise<DesktopPrefsView>;
+  settingsSet(update: Partial<DesktopPrefsView>): Promise<DesktopPrefsView>;
+  runningApps(): Promise<{ exe: string; name: string }[]>;
 }

@@ -15,8 +15,11 @@ if (role.role === "shell") {
     retryServer: () => ipcRenderer.invoke(IPC.retryServer),
     changeServer: () => ipcRenderer.invoke(IPC.changeServer),
     pickerGetSources: () => ipcRenderer.invoke(IPC.pickerGetSources),
-    pickerChoose: (id) => ipcRenderer.invoke(IPC.pickerChoose, id),
+    pickerChoose: (id, audio) => ipcRenderer.invoke(IPC.pickerChoose, id, audio),
     keybindDone: (code) => ipcRenderer.invoke(IPC.keybindDone, code),
+    settingsGet: () => ipcRenderer.invoke(IPC.settingsGet),
+    settingsSet: (update) => ipcRenderer.invoke(IPC.settingsSet, update),
+    runningApps: () => ipcRenderer.invoke(IPC.runningApps),
   };
   contextBridge.exposeInMainWorld("shellApi", api);
 } else if (role.role === "remote") {
@@ -24,12 +27,23 @@ if (role.role === "shell") {
   // origin and operation; this only carries them.
   const eventListeners = new Set<(event: { ev: string }) => void>();
   ipcRenderer.on(IPC.engineEvent, (_e, event: { ev: string }) => eventListeners.forEach((l) => l(event)));
+  const audioListeners = new Set<(stream: number, samples: ArrayBuffer) => void>();
+  ipcRenderer.on(IPC.engineAudio, (_e, stream: number, data: Uint8Array) => {
+    // A fresh, aligned copy: contextBridge hands ArrayBuffers across by copy.
+    const samples = data.buffer.slice(data.byteOffset, data.byteOffset + data.byteLength) as ArrayBuffer;
+    audioListeners.forEach((l) => l(stream, samples));
+  });
   const channel: EngineChannel = {
     request: (op, args) => ipcRenderer.invoke(IPC.engineRequest, op, args ?? {}),
     onEvent: (listener) => void eventListeners.add(listener),
     pttGet: () => ipcRenderer.invoke(IPC.pttGet),
     pttCapture: () => ipcRenderer.invoke(IPC.pttCapture),
     pttClear: () => ipcRenderer.invoke(IPC.pttClear),
+    appAudioClaim: () => ipcRenderer.invoke(IPC.appAudioClaim),
+    gameCurrent: () => ipcRenderer.invoke(IPC.gameCurrent),
+    duckingGet: () => ipcRenderer.invoke(IPC.duckingGet),
+    duckingSet: (amount) => ipcRenderer.invoke(IPC.duckingSet, amount),
+    onAudio: (listener) => void audioListeners.add(listener),
   };
   contextBridge.exposeInMainWorld("__chatterEngine", channel);
   contextBridge.exposeInMainWorld("__chatterShell", {

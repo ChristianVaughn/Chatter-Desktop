@@ -12,6 +12,7 @@
 import type { ChatterDesktopBridge, PttBinding } from "../contract/bridge";
 import type {
   AudioDevice,
+  DisplayCaptureBackend,
   LocalMic,
   MicOptions,
   MicTest,
@@ -31,6 +32,12 @@ export interface EngineChannel {
   pttGet(): Promise<PttBinding | null>;
   pttCapture(): Promise<PttBinding | null>;
   pttClear(): Promise<void>;
+  /** The app-audio stream started for the share just picked, if any. */
+  appAudioClaim(): Promise<number | null>;
+  gameCurrent(): Promise<string | null>;
+  duckingGet(): Promise<number>;
+  duckingSet(amount: number): Promise<void>;
+  onAudio(listener: (stream: number, samples: ArrayBuffer) => void): void;
 }
 
 export interface BridgeBase {
@@ -321,10 +328,104 @@ export function installDesktopBridge(base: BridgeBase): void {
     },
   };
 
+  // ─── Screen-share audio ────────────────────────────────────────────────
+  // The engine streams the chosen app's audio as 10 ms frames of 48 kHz
+  // interleaved stereo float; an AudioWorklet turns them back into a track.
+  const audioSinks = new Map<number, (samples: Float32Array) => void>();
+  engine.onAudio((stream, samples) => audioSinks.get(stream)?.(new Float32Array(samples)));
+
+  // Plays queued frames; silence when starved, and drops the oldest audio if
+  // it falls more than 200 ms behind so latency can't grow.
+  const workletSource = `
+    class ChatterAppAudio extends AudioWorkletProcessor {
+      constructor() {
+        super();
+        this.queue = [];
+        this.offset = 0;
+        this.queued = 0;
+        this.port.onmessage = (e) => {
+          this.queue.push(e.data);
+          this.queued += e.data.length / 2;
+          while (this.queued > 9600 && this.queue.length > 1) {
+            this.queued -= (this.queue.shift().length - this.offset) / 2;
+            this.offset = 0;
+          }
+        };
+      }
+      process(_inputs, outputs) {
+        const [left, right] = outputs[0];
+        for (let i = 0; i < left.length; i++) {
+          const chunk = this.queue[0];
+          if (!chunk) { left[i] = 0; if (right) right[i] = 0; continue; }
+          left[i] = chunk[this.offset];
+          if (right) right[i] = chunk[this.offset + 1];
+          this.offset += 2;
+          this.queued -= 1;
+          if (this.offset >= chunk.length) { this.queue.shift(); this.offset = 0; }
+        }
+        return true;
+      }
+    }
+    registerProcessor("chatter-app-audio", ChatterAppAudio);
+  `;
+
+  async function appAudioTrack(stream: number): Promise<MediaStreamTrack> {
+    const ctx = new AudioContext({ sampleRate: 48_000 });
+    const url = URL.createObjectURL(new Blob([workletSource], { type: "text/javascript" }));
+    try {
+      await ctx.audioWorklet.addModule(url);
+    } finally {
+      URL.revokeObjectURL(url);
+    }
+    const node = new AudioWorkletNode(ctx, "chatter-app-audio", { numberOfInputs: 0, outputChannelCount: [2] });
+    const destination = ctx.createMediaStreamDestination();
+    destination.channelCount = 2;
+    node.connect(destination);
+    audioSinks.set(stream, (samples) => node.port.postMessage(samples, [samples.buffer]));
+    const track = destination.stream.getAudioTracks()[0];
+    // Stopping the share stops the capture; nothing else tells the engine.
+    const stop = track.stop.bind(track);
+    let stopped = false;
+    track.stop = () => {
+      stop();
+      if (stopped) return;
+      stopped = true;
+      audioSinks.delete(stream);
+      void ctx.close();
+      fire("appaudio.stop", { stream });
+    };
+    return track;
+  }
+
+  const displayCapture: DisplayCaptureBackend = {
+    getDisplayMedia: async (options) => {
+      // Video from Chromium (hardware encode); the audio choice is made in
+      // the shell's picker and captured per app by the engine.
+      const stream = await navigator.mediaDevices.getDisplayMedia({ ...options, audio: false });
+      const audioStream = await engine.appAudioClaim().catch(() => null);
+      if (audioStream === null) return stream;
+      const track = await appAudioTrack(audioStream);
+      stream.addTrack(track);
+      // The video ending (the OS's "stop sharing") ends the audio with it.
+      stream.getVideoTracks()[0]?.addEventListener("ended", () => track.stop());
+      return stream;
+    },
+  };
+
   const bridge: ChatterDesktopBridge = {
     ...base,
     features: [...features],
     voiceBackend: features.has("voice-backend@1") ? (version: 1) => (version === 1 ? backend : null) : undefined,
+    displayCapture: features.has("app-audio@1") ? (version: 1) => (version === 1 ? displayCapture : null) : undefined,
+    ducking: features.has("ducking")
+      ? { get: () => engine.duckingGet(), set: (amount) => engine.duckingSet(amount) }
+      : undefined,
+    gameActivity: features.has("game-activity")
+      ? {
+          current: () => engine.gameCurrent(),
+          subscribe: (listener) => on("game", (e) => listener((e.game as string | null) ?? null)),
+        }
+      : undefined,
     pushToTalk: features.has("ptt")
       ? {
           subscribe: (listener) => on("ptt", (e) => listener(e.down === true)),

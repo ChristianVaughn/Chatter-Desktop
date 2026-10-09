@@ -51,4 +51,13 @@ deb:
     - libpulse0
 appImage:
   artifactName: Chatter-${version}-${arch}.AppImage
-publish: null
+# chatter:// links (invites, message links). Windows registers at runtime.
+protocols:
+  - name: Chatter
+    schemes: [chatter]
+# Updates come from GitHub Releases once the repository is published; until
+# then the updater finds nothing and stays quiet.
+publish:
+  provider: github
+  owner: ChristianVaughn
+  repo: Chatter-Desktop

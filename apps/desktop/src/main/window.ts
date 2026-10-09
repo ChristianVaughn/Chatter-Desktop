@@ -27,7 +27,7 @@ function initialBounds() {
   return visible ? saved : { width: saved.width, height: saved.height, maximized: saved.maximized };
 }
 
-export function createMainWindow(): BrowserWindow {
+export function createMainWindow(options: { hidden?: boolean } = {}): BrowserWindow {
   const bounds = initialBounds();
   const window = new BrowserWindow({
     width: bounds?.width ?? 1280,
@@ -54,7 +54,7 @@ export function createMainWindow(): BrowserWindow {
   mainWindow = window;
   if (bounds?.maximized) window.maximize();
 
-  window.once("ready-to-show", () => window.show());
+  if (!options.hidden) window.once("ready-to-show", () => window.show());
   window.on("focus", () => window.flashFrame(false));
 
   // Close hides to the tray; quitting goes through the tray or app menu.

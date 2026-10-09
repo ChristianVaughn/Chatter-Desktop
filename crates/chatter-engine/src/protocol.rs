@@ -54,7 +54,6 @@ impl Out {
         }
     }
 
-    #[allow(dead_code)] // app-audio streaming (screen share) uses it
     pub fn binary(&self, stream: u32, data: &[u8]) {
         let mut payload = Vec::with_capacity(data.len() + 4);
         payload.extend_from_slice(&stream.to_le_bytes());

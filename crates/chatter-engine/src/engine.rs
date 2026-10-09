@@ -6,6 +6,7 @@ use crate::devices;
 use crate::peers::{IceServerArg, Peers};
 use crate::playout::{Playout, Position};
 use crate::protocol::{Out, Request};
+use chatter_appaudio::{AppAudioCapture, Ducker, Target};
 use chatter_hotkeys::{Backend, Binding, HotkeyWatcher};
 use chatter_media::libwebrtc::{
     audio_source::native::NativeAudioSource, audio_stream::native::NativeAudioStream, prelude::*,
@@ -42,6 +43,44 @@ pub struct Engine {
     mics: HashMap<String, Mic>,
     test: Option<MicTest>,
     hotkeys: Option<HotkeyWatcher>,
+    app_audio: HashMap<u32, AppAudioCapture>,
+    next_stream: u32,
+    ducking: Arc<parking_lot::Mutex<Ducking>>,
+}
+
+/// Turning other apps down while the call is audible.
+#[derive(Default)]
+struct Ducking {
+    /// 0 (off) to 1 (silence them).
+    amount: f32,
+    talking: bool,
+    ducker: Option<Ducker>,
+    /// What was last asked of the ducker, to log changes only.
+    applied: Option<Option<u32>>,
+}
+
+impl Ducking {
+    fn apply(&mut self) {
+        if self.amount > 0.0 && self.ducker.is_none() {
+            // Never our own sound: the engine, and the app that started it.
+            let mut own = vec![std::process::id()];
+            own.extend(crate::processes::parent_pid());
+            self.ducker = Some(Ducker::new(own));
+        }
+        if let Some(ducker) = &self.ducker {
+            let duck = self.talking && self.amount > 0.0;
+            let level = duck.then_some(1.0 - self.amount);
+            let key = level.map(|l| (l * 100.0).round() as u32);
+            if self.applied != Some(key) {
+                match level {
+                    Some(l) => log::info!("ducking other apps to {:.0}%", l * 100.0),
+                    None => log::info!("restoring other apps' volume"),
+                }
+                self.applied = Some(key);
+            }
+            ducker.set(level);
+        }
+    }
 }
 
 fn arg<T: DeserializeOwned>(args: &Value, name: &str) -> Result<T, String> {
@@ -71,6 +110,9 @@ impl Engine {
             mics: HashMap::new(),
             test: None,
             hotkeys,
+            app_audio: HashMap::new(),
+            next_stream: 1,
+            ducking: Arc::default(),
         }
     }
 
@@ -79,6 +121,13 @@ impl Engine {
         let mut features = vec!["voice"];
         if !matches!(backend, None | Some(Backend::Unsupported)) {
             features.push("ptt");
+        }
+        let caps = chatter_appaudio::capabilities();
+        if caps.per_app || caps.all_except {
+            features.push("app-audio");
+        }
+        if chatter_appaudio::ducking_supported() {
+            features.push("ducking");
         }
         json!({
             "version": env!("CARGO_PKG_VERSION"),
@@ -89,7 +138,13 @@ impl Engine {
 
     fn playout(&mut self) -> &Playout {
         if self.playout.is_none() {
-            let playout = Playout::start(self.apm.clone());
+            let ducking = self.ducking.clone();
+            let on_speech: crate::playout::SpeechListener = Box::new(move |talking| {
+                let mut d = ducking.lock();
+                d.talking = talking;
+                d.apply();
+            });
+            let playout = Playout::start(self.apm.clone(), Some(on_speech));
             playout.set_output(&self.output.0, self.output.1);
             self.playout = Some(playout);
         }
@@ -260,7 +315,63 @@ impl Engine {
                 ))
             }
 
+            "appaudio.caps" => {
+                Ok(serde_json::to_value(chatter_appaudio::capabilities()).unwrap_or_default())
+            }
+            "appaudio.list" => {
+                let exclude: Vec<u32> = arg(a, "excludePids").unwrap_or_default();
+                Ok(serde_json::to_value(chatter_appaudio::list_apps(&exclude)).unwrap_or_default())
+            }
+            "appaudio.windowPid" => {
+                let source: String = arg(a, "sourceId")?;
+                Ok(json!(chatter_appaudio::window_pid(&source)))
+            }
+            "appaudio.start" => {
+                let kind: String = arg(&a["target"], "kind")?;
+                let target = match kind.as_str() {
+                    "app" => Target::App {
+                        pid: arg(&a["target"], "pid")?,
+                    },
+                    "allExcept" => Target::AllExcept {
+                        pids: arg(&a["target"], "pids")?,
+                    },
+                    other => return Err(format!("unknown audio target {other}")),
+                };
+                let stream = self.next_stream;
+                self.next_stream += 1;
+                let out = self.out.clone();
+                let mut bytes = Vec::with_capacity(960 * 4);
+                let capture = AppAudioCapture::start(target, move |samples: &[f32]| {
+                    bytes.clear();
+                    for s in samples {
+                        bytes.extend_from_slice(&s.to_le_bytes());
+                    }
+                    out.binary(stream, &bytes);
+                })
+                .map_err(|e| e.to_string())?;
+                self.app_audio.insert(stream, capture);
+                Ok(json!({ "stream": stream }))
+            }
+            "appaudio.stop" => {
+                let stream: u32 = arg(a, "stream")?;
+                self.app_audio.remove(&stream);
+                Ok(Value::Null)
+            }
+
+            "ducking.set" => {
+                let amount: f32 = arg(a, "amount")?;
+                let mut d = self.ducking.lock();
+                d.amount = amount.clamp(0.0, 1.0);
+                d.apply();
+                Ok(Value::Null)
+            }
+
+            "processes.list" => {
+                Ok(serde_json::to_value(crate::processes::list()).unwrap_or_default())
+            }
+
             "session.reset" => {
+                self.app_audio.clear();
                 self.peers.close_all();
                 self.mics.clear();
                 self.stop_test();
@@ -338,6 +449,12 @@ impl Engine {
     fn close_playout(&mut self) {
         for (_, task) in self.slot_feeds.drain() {
             task.abort();
+        }
+        // No call, nobody talking: put other apps back.
+        {
+            let mut d = self.ducking.lock();
+            d.talking = false;
+            d.apply();
         }
         if self.test.is_none() {
             self.playout = None;

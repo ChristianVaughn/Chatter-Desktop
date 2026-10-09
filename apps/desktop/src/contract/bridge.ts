@@ -31,6 +31,20 @@ export interface DesktopPushToTalk {
   clearBinding(): Promise<void>;
 }
 
+/** feature "game-activity": the game the desktop app sees running, if the
+ *  person lets it share that. */
+export interface DesktopGameActivity {
+  current(): Promise<string | null>;
+  subscribe(listener: (game: string | null) => void): () => void;
+}
+
+/** feature "ducking": lower other apps' sound while people in the call
+ *  talk. `amount` is 0 (off) to 1 (silence them). */
+export interface DesktopDucking {
+  get(): Promise<number>;
+  set(amount: number): Promise<void>;
+}
+
 export interface ChatterDesktopBridge {
   bridgeVersion: number;
   appVersion: string;
@@ -40,8 +54,11 @@ export interface ChatterDesktopBridge {
   pushToTalk?: DesktopPushToTalk;
   /** feature "voice-backend@1": the native voice engine (see lib/media). */
   voiceBackend?: (apiVersion: 1) => unknown;
-  /** feature "app-audio@1": audio from the app being screen-shared. */
-  appAudio?: unknown;
+  /** feature "app-audio@1": screen capture whose audio comes from the shared
+   *  app (or everything but Chatter) rather than the browser's loopback. */
+  displayCapture?: (apiVersion: 1) => unknown;
+  gameActivity?: DesktopGameActivity;
+  ducking?: DesktopDucking;
 }
 
 declare global {

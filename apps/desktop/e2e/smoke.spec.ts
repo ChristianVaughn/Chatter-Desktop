@@ -83,3 +83,16 @@ test("external links leave the app", async () => {
     .toEqual(["https://example.com/"]);
   expect(new URL(page.url()).origin).toBe(new URL(SERVER!).origin);
 });
+
+test("a chatter:// link opens that page of the server", async () => {
+  test.skip(!SERVER, "set CHATTER_E2E_SERVER to run");
+  // A fresh app, already pointed at the server, launched by the link.
+  await quit(app);
+  const { launchAt } = await import("./chatter");
+  const page = `${new URL(SERVER!).origin}/?from=deeplink`;
+  const launched = await launchAt([`chatter://open?url=${encodeURIComponent(page)}`]);
+  app = launched.app;
+  profile = launched.profile;
+  const window = await app.firstWindow();
+  await window.waitForURL(page);
+});

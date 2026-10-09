@@ -1,13 +1,19 @@
-import { app, ipcMain, Menu, session, type IpcMainInvokeEvent } from "electron";
+import { app, ipcMain, Menu, session, shell, type IpcMainInvokeEvent } from "electron";
 import { IPC, type PreloadRole } from "../shared/ipc";
+import { launchedAtLogin } from "./autostart";
+import { findDeepLink, openDeepLink, registerProtocol } from "./deepLinks";
 import { installDisplayMediaHandler } from "./displayMedia";
 import { engineFeatures, installEngineBridge } from "./engineBridge";
-import { engine } from "./engineHost";
+import { engine, logsDir } from "./engineHost";
 import { isServerUrl } from "./origin";
 import { installPermissionHandlers } from "./permissions";
 import { getServerOrigin, normaliseOrigin, probeServer, setServerOrigin } from "./serverStore";
 import { isShellUrl } from "./shellPages";
+import { startGameDetection } from "./games";
+import { getPrefs } from "./serverStore";
+import { installSettings, showSettings } from "./settingsWindow";
 import { createTray } from "./tray";
+import { checkForUpdatesNow, startUpdater } from "./updater";
 import { createMainWindow, getMainWindow, loadHome, markQuitting, showMainWindow, showServerPicker } from "./window";
 
 const APP_ID = "com.chatter.desktop";
@@ -20,7 +26,12 @@ if (process.env["CHATTER_USER_DATA"]) app.setPath("userData", process.env["CHATT
 if (!app.requestSingleInstanceLock()) {
   app.quit();
 } else {
-  app.on("second-instance", () => showMainWindow());
+  // A deep link opened while we run arrives as the second launch's argv.
+  app.on("second-instance", (_event, argv) => {
+    const link = findDeepLink(argv);
+    if (link) void openDeepLink(link);
+    else showMainWindow();
+  });
   start();
 }
 
@@ -28,6 +39,7 @@ function start(): void {
   // Join, mute and entrance sounds play without a click having happened first.
   app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
   if (process.platform === "win32") app.setAppUserModelId(APP_ID);
+  registerProtocol();
 
   app.whenReady().then(async () => {
     app.userAgentFallback = `${app.userAgentFallback} ChatterDesktop/${app.getVersion()}`;
@@ -39,16 +51,25 @@ function start(): void {
     await engine.ready(3000);
 
     installPermissionHandlers(session.defaultSession);
+    installSettings();
     installDisplayMediaHandler(session.defaultSession, getMainWindow);
     registerIpc();
     Menu.setApplicationMenu(buildAppMenu());
 
-    createMainWindow();
+    // Started by the system at sign-in, stay in the tray if asked to.
+    createMainWindow({ hidden: launchedAtLogin() && getPrefs().startWithSystem && getPrefs().startMinimized });
     createTray({
       show: showMainWindow,
+      settings: showSettings,
+      checkForUpdates: () => void checkForUpdatesNow(),
       changeServer: showServerPicker,
       quit: () => app.quit(),
     });
+    startGameDetection();
+    startUpdater();
+
+    const link = findDeepLink(process.argv);
+    if (link) void openDeepLink(link);
   });
 
   app.on("before-quit", () => {
@@ -112,6 +133,7 @@ function buildAppMenu(): Menu {
     {
       label: "Chatter",
       submenu: [
+        { label: "Settings…", click: showSettings },
         { label: "Change server…", click: showServerPicker },
         { type: "separator" },
         { role: "quit" },
@@ -133,5 +155,14 @@ function buildAppMenu(): Menu {
       ],
     },
     { role: "windowMenu" },
+    {
+      label: "Help",
+      submenu: [
+        { label: "Open logs folder", click: () => void shell.openPath(logsDir()) },
+        { label: "Check for updates…", click: () => void checkForUpdatesNow() },
+        { type: "separator" },
+        { label: `Chatter ${app.getVersion()}`, enabled: false },
+      ],
+    },
   ]);
 }

@@ -1,10 +1,27 @@
 import { app } from "electron";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { existsSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, renameSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { FRAME_BINARY, FRAME_JSON, type EngineEvent, type EngineHello, type EngineResponse } from "../shared/engine";
 
 type EventListener = (event: EngineEvent) => void;
+
+export function logsDir(): string {
+  return join(app.getPath("userData"), "logs");
+}
+
+/** The engine's log, kept for "Open logs folder": rotated at 5 MB, one old copy. */
+function logEngine(chunk: Buffer): void {
+  try {
+    const dir = logsDir();
+    mkdirSync(dir, { recursive: true });
+    const file = join(dir, "engine.log");
+    if (existsSync(file) && statSync(file).size > 5 * 1024 * 1024) renameSync(file, join(dir, "engine.old.log"));
+    appendFileSync(file, chunk);
+  } catch {
+    // Logging must never take the engine down with it.
+  }
+}
 type BinaryListener = (stream: number, data: Buffer) => void;
 
 const exe = process.platform === "win32" ? "chatter-engine.exe" : "chatter-engine";
@@ -38,6 +55,10 @@ export class EngineHost {
   /** Between a crash and the restart's spawn. */
   private restarting = false;
   hello: EngineHello | null = null;
+
+  get pid(): number | undefined {
+    return this.child?.pid;
+  }
   private helloWaiters: ((h: EngineHello | null) => void)[] = [];
   private readonly readyListeners = new Set<(hello: EngineHello) => void>();
 
@@ -56,7 +77,10 @@ export class EngineHost {
     this.child = child;
     this.buffer = Buffer.alloc(0);
     child.stdout.on("data", (chunk: Buffer) => this.onData(chunk));
-    child.stderr.on("data", (chunk: Buffer) => process.stderr.write(`[engine] ${chunk}`));
+    child.stderr.on("data", (chunk: Buffer) => {
+      process.stderr.write(`[engine] ${chunk}`);
+      logEngine(chunk);
+    });
     child.on("exit", (code, signal) => this.onExit(code, signal));
     child.on("error", (err) => console.warn("[engine] failed to start:", err.message));
   }

@@ -3,6 +3,8 @@ import icon from "../../resources/icon.png?asset";
 
 export interface TrayActions {
   show(): void;
+  settings(): void;
+  checkForUpdates(): void;
   changeServer(): void;
   quit(): void;
 }
@@ -16,6 +18,8 @@ export function createTray(actions: TrayActions): Tray {
   tray.setContextMenu(
     Menu.buildFromTemplate([
       { label: "Open Chatter", click: actions.show },
+      { label: "Settings…", click: actions.settings },
+      { label: "Check for updates…", click: actions.checkForUpdates },
       { label: "Change server…", click: actions.changeServer },
       { type: "separator" },
       { label: "Quit Chatter", click: actions.quit },

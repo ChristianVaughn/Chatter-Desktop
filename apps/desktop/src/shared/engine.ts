@@ -36,6 +36,7 @@ export const PAGE_OPS = [
   "test.monitor",
   "test.gain",
   "test.stop",
+  "appaudio.stop",
 ] as const;
 
 export type PageOp = (typeof PAGE_OPS)[number];

@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+    <title>Chatter settings</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="settings">
+      <h1>Desktop settings</h1>
+      <p>These belong to this computer. Everything else is in Chatter's own settings.</p>
+
+      <section>
+        <h2>Startup</h2>
+        <label class="toggle"><input type="checkbox" id="startWithSystem" /> <span>Open Chatter when you sign in</span></label>
+        <label class="toggle"><input type="checkbox" id="startMinimized" /> <span>Start in the tray</span></label>
+      </section>
+
+      <section>
+        <h2>Activity</h2>
+        <label class="toggle"><input type="checkbox" id="shareGameActivity" /> <span>Show the game you're playing</span></label>
+        <p class="hint">Recognised games, and any you add below, show as "Playing …" next to your name.</p>
+        <ul class="games" id="games"></ul>
+        <div class="row start">
+          <select id="running"><option value="">Add a running program…</option></select>
+          <button type="button" id="refresh">Refresh</button>
+        </div>
+      </section>
+
+      <section>
+        <h2>Updates</h2>
+        <label class="toggle"><input type="checkbox" id="autoUpdate" /> <span>Install updates automatically</span></label>
+        <p class="hint" id="version"></p>
+      </section>
+    </main>
+    <script type="module" src="./settings.ts"></script>
+  </body>
+</html>

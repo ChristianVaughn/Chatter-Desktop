@@ -50,6 +50,15 @@ enum Command {
         /// Identify as the desktop app in the first frame.
         #[arg(long)]
         desktop: bool,
+        /// Report this game being played (as the desktop app does).
+        #[arg(long)]
+        game: Option<String>,
+    },
+    /// Print the presence updates this user receives for a while.
+    Watch {
+        username: String,
+        #[arg(long, default_value_t = 10)]
+        seconds: u64,
     },
     /// Create a room owned by the first user, join the others, and print the
     /// room and its voice channel.
@@ -132,13 +141,35 @@ async fn main() -> Result<()> {
             username,
             seconds,
             desktop,
+            game,
         } => {
             let session =
                 api::login(&server, &username, &stored(&store, &server, &username)?).await?;
-            let (_outbox, _inbox) =
+            let (outbox, _inbox) =
                 signaling::connect_as(&session.ws_url()?, &session.access_token, desktop).await?;
+            if let Some(game) = game {
+                outbox.send(serde_json::json!({ "type": "game_activity", "game": game }));
+            }
             tokio::time::sleep(Duration::from_secs(seconds)).await;
             println!("closed the spare connection for {username}");
+        }
+        Command::Watch { username, seconds } => {
+            let session =
+                api::login(&server, &username, &stored(&store, &server, &username)?).await?;
+            let (_outbox, mut inbox) =
+                signaling::connect(&session.ws_url()?, &session.access_token).await?;
+            let deadline = tokio::time::sleep(Duration::from_secs(seconds));
+            tokio::pin!(deadline);
+            loop {
+                tokio::select! {
+                    _ = &mut deadline => break,
+                    msg = inbox.recv() => match msg {
+                        Some(m) if m["type"] == "presence_update" => println!("{m}"),
+                        Some(_) => {}
+                        None => break,
+                    },
+                }
+            }
         }
         Command::SetupRoom { name, usernames } => {
             let owner = api::login(

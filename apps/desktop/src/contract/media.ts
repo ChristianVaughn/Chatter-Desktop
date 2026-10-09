@@ -98,6 +98,12 @@ export interface MicTest {
   stop(): void;
 }
 
+/** Where screen shares come from. The browser's getDisplayMedia, or the
+ *  desktop app's, which adds the shared app's own audio. */
+export interface DisplayCaptureBackend {
+  getDisplayMedia(options: DisplayMediaStreamOptions): Promise<MediaStream>;
+}
+
 export interface VoiceMediaBackend {
   readonly kind: "browser" | "native";
   /** Noise suppression modes this backend can run, for the settings menu. */

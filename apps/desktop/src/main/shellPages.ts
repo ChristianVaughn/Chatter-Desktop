@@ -1,7 +1,7 @@
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 
-export type ShellPage = "server" | "picker" | "offline" | "keybind";
+export type ShellPage = "server" | "picker" | "offline" | "keybind" | "settings";
 
 // electron-vite serves the shell pages from a dev server during `npm run dev`
 // and from out/renderer once built.

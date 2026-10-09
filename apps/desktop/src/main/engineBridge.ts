@@ -3,8 +3,10 @@ import { join } from "node:path";
 import { PAGE_OPS } from "../shared/engine";
 import { IPC } from "../shared/ipc";
 import { engine } from "./engineHost";
+import { pageAudioStreams } from "./displayMedia";
+import { currentGame, onGameChanged } from "./games";
 import { isServerUrl } from "./origin";
-import { DEFAULT_PTT_BINDING, getPttBinding, setPttBinding, type PttBindingConfig } from "./serverStore";
+import { DEFAULT_PTT_BINDING, getPrefs, getPttBinding, setPrefs, setPttBinding, type PttBindingConfig } from "./serverStore";
 import { isShellUrl, shellPageUrl } from "./shellPages";
 
 const pageOps = new Set<string>(PAGE_OPS);
@@ -27,6 +29,9 @@ export function engineFeatures(): string[] {
   const features: string[] = [];
   if (hello.features.includes("voice")) features.push("voice-backend@1");
   if (hello.features.includes("ptt")) features.push("ptt");
+  if (hello.features.includes("app-audio")) features.push("app-audio@1");
+  features.push("game-activity");
+  if (hello.features.includes("ducking")) features.push("ducking");
   return features;
 }
 
@@ -76,6 +81,11 @@ export function installEngineBridge(getWindow: () => BrowserWindow | null): void
     if (!isServerUrl(event.senderFrame?.url)) throw new Error("not allowed");
     if (typeof op !== "string" || !pageOps.has(op)) throw new Error(`unknown operation ${String(op)}`);
     const payload = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    if (op === "appaudio.stop") {
+      // Only a stream the page was given.
+      const stream = Number(payload["stream"]);
+      if (!pageAudioStreams.delete(stream)) return null;
+    }
     return engine.request(op, payload);
   });
 
@@ -86,7 +96,39 @@ export function installEngineBridge(getWindow: () => BrowserWindow | null): void
     }
   });
 
-  engine.onReady(() => void applyPttBinding(getPttBinding()));
+  engine.onReady(() => {
+    void applyPttBinding(getPttBinding());
+    void engine.request("ducking.set", { amount: getPrefs().ducking }).catch(() => {});
+  });
+
+  ipcMain.handle(IPC.duckingGet, (event) => (isServerUrl(event.senderFrame?.url) ? getPrefs().ducking : 0));
+  ipcMain.handle(IPC.duckingSet, async (event, amount: unknown) => {
+    if (!isServerUrl(event.senderFrame?.url) || typeof amount !== "number" || !Number.isFinite(amount)) return;
+    const clamped = Math.min(1, Math.max(0, amount));
+    setPrefs({ ducking: clamped });
+    await engine.request("ducking.set", { amount: clamped }).catch(() => {});
+  });
+
+  // Game activity goes to the page, which reports it to the server.
+  onGameChanged((game) => {
+    const contents = getWindow()?.webContents;
+    if (contents && !contents.isDestroyed() && isServerUrl(contents.getURL())) {
+      contents.send(IPC.engineEvent, { ev: "game", game });
+    }
+  });
+  ipcMain.handle(IPC.gameCurrent, (event) => (isServerUrl(event.senderFrame?.url) ? currentGame() : null));
+
+  // Screen-share audio the page owns: 10 ms frames of 48 kHz stereo float.
+  engine.onBinary((stream, data) => {
+    if (!pageAudioStreams.has(stream)) return;
+    const contents = getWindow()?.webContents;
+    if (contents && !contents.isDestroyed() && isServerUrl(contents.getURL())) {
+      contents.send(IPC.engineAudio, stream, data);
+    }
+  });
+  engine.onEvent((event) => {
+    if (event.ev === "engine.lost") pageAudioStreams.clear();
+  });
 
   ipcMain.handle(IPC.pttGet, async (event) => {
     if (!isServerUrl(event.senderFrame?.url)) return null;

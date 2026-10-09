@@ -48,8 +48,12 @@ struct Slot {
     applied: (f32, f32),
 }
 
+/// Told when people in the call start or stop being audible.
+pub type SpeechListener = Box<dyn Fn(bool) + Send + Sync>;
+
 struct Shared {
     slots: Mutex<HashMap<u32, Slot>>,
+    on_speech: Option<SpeechListener>,
     listener: Mutex<Position>,
     output: Mutex<(String, f32)>,
     output_changed: AtomicBool,
@@ -66,9 +70,10 @@ pub struct Playout {
 pub type SlotFeed = rtrb::Producer<f32>;
 
 impl Playout {
-    pub fn start(apm: SharedApm) -> Playout {
+    pub fn start(apm: SharedApm, on_speech: Option<SpeechListener>) -> Playout {
         let shared = Arc::new(Shared {
             slots: Mutex::new(HashMap::new()),
+            on_speech,
             listener: Mutex::new(Position::default()),
             output: Mutex::new(("default".into(), 1.0)),
             output_changed: AtomicBool::new(true),
@@ -288,6 +293,7 @@ fn run(shared: Arc<Shared>, apm: SharedApm) {
     let mut reverse = vec![0i16; SAMPLES_PER_FRAME * 2];
     let mut res_l = Vec::new();
     let mut res_r = Vec::new();
+    let mut speech = SpeechDetector::default();
 
     while !shared.stop.load(Ordering::Acquire) {
         if shared.output_changed.swap(false, Ordering::AcqRel) {
@@ -358,6 +364,14 @@ fn run(shared: Arc<Shared>, apm: SharedApm) {
                 slot.applied = to;
             }
         }
+        // Someone in the call audible (before output volume, so turning
+        // Chatter down doesn't stop other apps being ducked).
+        if let Some(changed) = speech.push(&left, &right) {
+            if let Some(listener) = &shared.on_speech {
+                listener(changed);
+            }
+        }
+
         // The mic test's monitor plays straight through, like the browser's
         // <audio> element does; voice slots are panned like its PannerNode,
         // which also puts a centred speaker at -3 dB a side.
@@ -398,6 +412,40 @@ fn run(shared: Arc<Shared>, apm: SharedApm) {
     }
 }
 
+/// Voices in the mix, with a hold so ducking doesn't pump between words.
+#[derive(Default)]
+struct SpeechDetector {
+    talking: bool,
+    quiet_frames: u32,
+}
+
+impl SpeechDetector {
+    /// About -40 dBFS: speech after the slot gains, not line noise.
+    const THRESHOLD: f32 = 0.01;
+    /// 800 ms of 10 ms frames.
+    const RELEASE_FRAMES: u32 = 80;
+
+    /// The new state when it changes.
+    fn push(&mut self, left: &[f32], right: &[f32]) -> Option<bool> {
+        let energy: f32 = left.iter().chain(right).map(|s| s * s).sum();
+        let rms = (energy / (left.len() + right.len()) as f32).sqrt();
+        if rms > Self::THRESHOLD {
+            self.quiet_frames = 0;
+            if !self.talking {
+                self.talking = true;
+                return Some(true);
+            }
+        } else if self.talking {
+            self.quiet_frames += 1;
+            if self.quiet_frames >= Self::RELEASE_FRAMES {
+                self.talking = false;
+                return Some(false);
+            }
+        }
+        None
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -429,6 +477,19 @@ mod tests {
         // Inside the reference distance stays at full volume.
         let (l, r) = spatial_gains(at(0.0, -1.0), at(0.0, 0.0));
         assert!(((l * l + r * r).sqrt() - 1.0).abs() < 1e-3);
+    }
+
+    #[test]
+    fn speech_detector_attacks_at_once_and_holds() {
+        let mut d = SpeechDetector::default();
+        let loud = vec![0.2f32; 480];
+        let quiet = vec![0.0f32; 480];
+        assert_eq!(d.push(&loud, &loud), Some(true));
+        assert_eq!(d.push(&loud, &loud), None);
+        for _ in 0..SpeechDetector::RELEASE_FRAMES - 1 {
+            assert_eq!(d.push(&quiet, &quiet), None);
+        }
+        assert_eq!(d.push(&quiet, &quiet), Some(false));
     }
 
     #[test]

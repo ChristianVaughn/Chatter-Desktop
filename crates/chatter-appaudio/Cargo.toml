@@ -1,0 +1,35 @@
+[package]
+name = "chatter-appaudio"
+description = "Per-application (and all-except-Chatter) audio capture for Chatter Desktop screen sharing."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows = { version = "0.62", features = [
+    "Wdk_System_SystemServices",
+    "Win32_Foundation",
+    "Win32_Media_Audio",
+    "Win32_Media_Multimedia",
+    "Win32_Security",
+    "Win32_Storage_FileSystem",
+    "Win32_System_Com",
+    "Win32_System_Com_StructuredStorage",
+    "Win32_System_Diagnostics_ToolHelp",
+    "Win32_System_SystemInformation",
+    "Win32_System_Threading",
+    "Win32_System_Variant",
+    "Win32_UI_WindowsAndMessaging",
+] }
+windows-core = "0.62"
+
+# PulseAudio client API, which pipewire-pulse also serves. Loaded at run time from
+# libpulse.so.0; building needs libpulse-dev (pkg-config `libpulse`).
+[target.'cfg(target_os = "linux")'.dependencies]
+libpulse-binding = "2.30"

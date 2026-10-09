@@ -12,6 +12,7 @@ mod engine;
 mod fake;
 mod peers;
 mod playout;
+mod processes;
 mod protocol;
 mod resample;
 

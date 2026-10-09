@@ -16,10 +16,36 @@ export interface PttBindingConfig {
   code: string;
 }
 
+/** Preferences the shell's own Settings window edits. */
+export interface DesktopPrefs {
+  /** Launch when the user signs in to their computer. */
+  startWithSystem: boolean;
+  /** Launched that way, stay in the tray instead of opening the window. */
+  startMinimized: boolean;
+  /** Tell people which game you're playing. */
+  shareGameActivity: boolean;
+  /** Executables the user added as games, beyond the built-in list. */
+  extraGames: { exe: string; name: string }[];
+  /** Check for and install updates. */
+  autoUpdate: boolean;
+  /** How far to turn other apps down while people talk: 0 (off) to 1. */
+  ducking: number;
+}
+
+export const DEFAULT_PREFS: DesktopPrefs = {
+  startWithSystem: false,
+  startMinimized: true,
+  shareGameActivity: true,
+  extraGames: [],
+  autoUpdate: true,
+  ducking: 0,
+};
+
 interface Config {
   serverOrigin?: string;
   window?: WindowBounds;
   pttBinding?: PttBindingConfig | null;
+  prefs?: Partial<DesktopPrefs>;
 }
 
 const configPath = () => join(app.getPath("userData"), "config.json");
@@ -49,6 +75,16 @@ export function getServerOrigin(): string | null {
 export function setServerOrigin(origin: string): void {
   load().serverOrigin = origin;
   save();
+}
+
+export function getPrefs(): DesktopPrefs {
+  return { ...DEFAULT_PREFS, ...load().prefs };
+}
+
+export function setPrefs(update: Partial<DesktopPrefs>): DesktopPrefs {
+  load().prefs = { ...getPrefs(), ...update };
+  save();
+  return getPrefs();
 }
 
 export const DEFAULT_PTT_BINDING: PttBindingConfig = { code: "Backquote" };

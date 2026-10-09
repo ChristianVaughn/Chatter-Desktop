@@ -1,6 +1,6 @@
 import { expect, test, type ElectronApplication, type Page } from "@playwright/test";
 import { execFileSync, spawn } from "node:child_process";
-import { mkdtempSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loudestWindow, readStereoWav } from "./audio";
@@ -19,6 +19,7 @@ import { ensureLoggedIn, launchAt, quit, SERVER, storedUser } from "./chatter";
 const ROOM = process.env["CHATTER_E2E_ROOM"];
 const ROOM_NAME = process.env["CHATTER_E2E_ROOM_NAME"] ?? "Native voice spike";
 const repoRoot = join(__dirname, "../../..");
+const profileDir = join(__dirname, "../test-results/profiles/browser_user");
 const bin = (name: string) => join(repoRoot, "target/debug", process.platform === "win32" ? `${name}.exe` : name);
 
 interface SlotHeard {
@@ -114,6 +115,10 @@ test("native voice: the engine carries the call both ways", async () => {
   await withApp([], env, async (_app, page) => {
     const features = await page.evaluate(() => (window as unknown as { chatterDesktop?: { features: string[] } }).chatterDesktop?.features);
     expect(features).toContain("voice-backend@1");
+    const logFile = join(profileDir, "logs", "engine.log");
+    const logStart = existsSync(logFile) ? statSync(logFile).size : 0;
+    // "Lower other apps" at 80%: the engine should duck while the other side talks.
+    await page.evaluate(() => (window as unknown as { chatterDesktop: { ducking: { set(n: number): Promise<void> } } }).chatterDesktop.ducking.set(0.8));
 
     const native = runNativeClient(30, "recordings/e2e-native");
     await page.waitForTimeout(2_000);
@@ -131,6 +136,13 @@ test("native voice: the engine carries the call both ways", async () => {
     const heard = heardBrowserUser(report);
     expect(heard, JSON.stringify(report.slots_heard)).toBeTruthy();
     expect(heard!.peak_dbfs).toBeGreaterThan(-40);
+
+    // Ducking followed the call: down while the native client talked, back
+    // once it stopped.
+    await page.evaluate(() => (window as unknown as { chatterDesktop: { ducking: { set(n: number): Promise<void> } } }).chatterDesktop.ducking.set(0));
+    const log = readFileSync(logFile).subarray(logStart).toString("utf8");
+    expect(log).toContain("ducking other apps to 20%");
+    expect(log).toContain("restoring other apps' volume");
   });
 });
 
