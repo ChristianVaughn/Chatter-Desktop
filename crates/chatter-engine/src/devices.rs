@@ -84,6 +84,35 @@ pub fn output(id: &str) -> Option<cpal::Device> {
     by_id(host, id, false).or_else(|| host.default_output_device())
 }
 
+/// The config to open a device with, asking for `ms` of audio per callback.
+///
+/// On Linux, cpal's PulseAudio backend otherwise leaves the buffer to the
+/// server, and its default is about two seconds (PulseAudio and
+/// pipewire-pulse alike). The mic then arrives in bursts bigger than the
+/// capture ring, which drops the rest, and the speakers run far behind.
+/// WASAPI's default period is already 10 ms, so Windows keeps it.
+pub fn stream_config(supported: &cpal::SupportedStreamConfig, ms: u32) -> cpal::StreamConfig {
+    #[allow(unused_mut)]
+    let mut config = supported.config();
+    #[cfg(target_os = "linux")]
+    if let cpal::SupportedBufferSize::Range { min, max } = *supported.buffer_size() {
+        let frames = config.sample_rate * ms / 1000;
+        config.buffer_size = cpal::BufferSize::Fixed(frames.clamp(min, max));
+    }
+    #[cfg(not(target_os = "linux"))]
+    let _ = ms;
+    config
+}
+
+/// The frames per callback a stream ended up with, for the log.
+pub fn describe_buffer(stream: &cpal::Stream) -> String {
+    use cpal::traits::StreamTrait;
+    match stream.buffer_size() {
+        Ok(frames) => format!("{frames} frames per callback"),
+        Err(_) => "unknown buffer".into(),
+    }
+}
+
 fn by_id(host: &cpal::Host, id: &str, input: bool) -> Option<cpal::Device> {
     if id == "default" || id.is_empty() {
         return None;

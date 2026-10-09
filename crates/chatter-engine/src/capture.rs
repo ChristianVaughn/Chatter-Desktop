@@ -16,7 +16,7 @@ use cpal::traits::{DeviceTrait, StreamTrait};
 use cpal::{Sample, SizedSample};
 use parking_lot::Mutex;
 use serde::Deserialize;
-use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,8 @@ struct Input {
     samples: rtrb::Consumer<f32>,
     rate: u32,
     lost: Arc<AtomicBool>,
+    /// Samples the device delivered that didn't fit in the ring.
+    dropped: Arc<AtomicUsize>,
     device_id: String,
 }
 
@@ -123,29 +125,34 @@ fn open_input(device_id: &str) -> anyhow::Result<Input> {
             samples,
             rate: 48_000,
             lost: Arc::new(AtomicBool::new(false)),
+            dropped: Arc::new(AtomicUsize::new(0)),
             device_id: device_id.to_string(),
         });
     }
     let device = devices::input(device_id).ok_or_else(|| anyhow::anyhow!("no microphone"))?;
     let supported = device.default_input_config()?;
-    let config = supported.config();
+    // 10 ms per callback, the frame size everything after this works in.
+    let config = devices::stream_config(&supported, 10);
     let channels = config.channels as usize;
     // Half a second of slack; the DSP thread drains it every few ms.
     let (producer, samples) = rtrb::RingBuffer::<f32>::new(config.sample_rate as usize / 2);
     let lost = Arc::new(AtomicBool::new(false));
+    let dropped = Arc::new(AtomicUsize::new(0));
+    let flags = (lost.clone(), dropped.clone());
     let stream = match supported.sample_format() {
-        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, producer, lost.clone())?,
-        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, producer, lost.clone())?,
-        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, producer, lost.clone())?,
-        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, producer, lost.clone())?,
+        cpal::SampleFormat::F32 => build::<f32>(&device, config, channels, producer, flags)?,
+        cpal::SampleFormat::I16 => build::<i16>(&device, config, channels, producer, flags)?,
+        cpal::SampleFormat::I32 => build::<i32>(&device, config, channels, producer, flags)?,
+        cpal::SampleFormat::U16 => build::<u16>(&device, config, channels, producer, flags)?,
         other => anyhow::bail!("unsupported microphone sample format {other:?}"),
     };
     stream.play()?;
     log::info!(
-        "mic open: {} at {} Hz, {} ch",
+        "mic open: {} at {} Hz, {} ch, {}",
         device,
         config.sample_rate,
-        channels
+        channels,
+        devices::describe_buffer(&stream)
     );
     Ok(Input {
         _stream: Some(stream),
@@ -153,6 +160,7 @@ fn open_input(device_id: &str) -> anyhow::Result<Input> {
         samples,
         rate: config.sample_rate,
         lost,
+        dropped,
         device_id: device_id.to_string(),
     })
 }
@@ -162,7 +170,7 @@ fn build<T>(
     config: cpal::StreamConfig,
     channels: usize,
     mut producer: rtrb::Producer<f32>,
-    lost: Arc<AtomicBool>,
+    (lost, dropped): (Arc<AtomicBool>, Arc<AtomicUsize>),
 ) -> anyhow::Result<cpal::Stream>
 where
     T: SizedSample + Send + 'static,
@@ -171,12 +179,19 @@ where
     let stream = device.build_input_stream::<T, _, _>(
         config,
         move |data: &[T], _| {
+            let mut full = 0;
             for frame in data.chunks(channels) {
                 let mono =
                     frame.iter().map(|s| f32::from_sample(*s)).sum::<f32>() / channels as f32;
-                // A full ring means the DSP thread stalled; dropping is the
-                // only real-time-safe answer.
-                let _ = producer.push(mono);
+                // A full ring means the DSP thread stalled or the device
+                // delivered a huge burst; dropping is the only real-time-safe
+                // answer, and the DSP thread reports it.
+                if producer.push(mono).is_err() {
+                    full += 1;
+                }
+            }
+            if full > 0 {
+                dropped.fetch_add(full, Ordering::Relaxed);
             }
         },
         move |err| match err.kind() {
@@ -203,6 +218,7 @@ fn run(shared: Arc<Shared>, apm: SharedApm, mut sink: FrameSink, mut levels: Lev
     let mut denoised = vec![0f32; SAMPLES_PER_FRAME];
     let mut meter = Meter::new();
     let mut retry_at = Instant::now();
+    let mut drops = DropReport::new();
     let mut apm_for: Option<(bool, bool, bool)> = None;
 
     while !shared.stop.load(Ordering::Acquire) {
@@ -265,6 +281,7 @@ fn run(shared: Arc<Shared>, apm: SharedApm, mut sink: FrameSink, mut levels: Lev
         let Some(current) = input.as_mut() else {
             continue;
         };
+        drops.add(current.dropped.swap(0, Ordering::Relaxed), current.rate);
         let available = current.samples.slots();
         if available == 0 {
             std::thread::sleep(Duration::from_millis(3));
@@ -315,6 +332,42 @@ fn run(shared: Arc<Shared>, apm: SharedApm, mut sink: FrameSink, mut levels: Lev
                 levels(level, speaking);
             }
             sink(&frame_f32);
+        }
+    }
+}
+
+/// Logs mic audio lost to a full ring, at most every few seconds, since a
+/// steady overflow would otherwise log on every pass.
+struct DropReport {
+    samples: usize,
+    rate: u32,
+    since: Instant,
+}
+
+impl DropReport {
+    const EVERY: Duration = Duration::from_secs(5);
+
+    fn new() -> Self {
+        Self {
+            samples: 0,
+            rate: 48_000,
+            since: Instant::now(),
+        }
+    }
+
+    fn add(&mut self, samples: usize, rate: u32) {
+        self.samples += samples;
+        self.rate = rate;
+        if self.samples > 0 && self.since.elapsed() >= Self::EVERY {
+            log::warn!(
+                "mic: dropped {} ms of audio in the last {} s (capture ring full)",
+                self.samples as u64 * 1000 / self.rate.max(1) as u64,
+                self.since.elapsed().as_secs()
+            );
+            self.samples = 0;
+            self.since = Instant::now();
+        } else if self.samples == 0 {
+            self.since = Instant::now();
         }
     }
 }

@@ -208,7 +208,8 @@ fn open_output(device_id: &str) -> anyhow::Result<Output> {
     }
     let device = devices::output(device_id).ok_or_else(|| anyhow::anyhow!("no speakers"))?;
     let supported = device.default_output_config()?;
-    let config = supported.config();
+    // 20 ms per callback; about TARGET_BUFFER_MS queued in the server too.
+    let config = devices::stream_config(&supported, 20);
     let channels = config.channels as usize;
     // Stereo frames, interleaved; a second of room.
     let (queue, consumer) = rtrb::RingBuffer::<f32>::new(config.sample_rate as usize * 2);
@@ -222,10 +223,11 @@ fn open_output(device_id: &str) -> anyhow::Result<Output> {
     };
     stream.play()?;
     log::info!(
-        "speakers open: {} at {} Hz, {} ch",
+        "speakers open: {} at {} Hz, {} ch, {}",
         device,
         config.sample_rate,
-        channels
+        channels,
+        devices::describe_buffer(&stream)
     );
     let resample = (config.sample_rate != 48_000).then(|| {
         (
