@@ -7,6 +7,7 @@ import { engineFeatures, installEngineBridge } from "./engineBridge";
 import { engine, logsDir } from "./engineHost";
 import { isServerUrl } from "./origin";
 import { installPermissionHandlers } from "./permissions";
+import { flushSession, persistCookiesPromptly } from "./persistence";
 import { getServerOrigin, normaliseOrigin, probeServer, setServerOrigin } from "./serverStore";
 import { isShellUrl } from "./shellPages";
 import { startGameDetection } from "./games";
@@ -43,6 +44,7 @@ function start(): void {
 
   app.whenReady().then(async () => {
     app.userAgentFallback = `${app.userAgentFallback} ChatterDesktop/${app.getVersion()}`;
+    persistCookiesPromptly(session.defaultSession);
 
     // The engine starts first so the page's first load already knows which
     // native features it can offer.
@@ -74,13 +76,13 @@ function start(): void {
   });
 
   // Quit waits for the engine to stop cleanly, so other apps it turned down
-  // get their volume back.
+  // get their volume back, and for the sign-in to be on disk.
   let engineStopped = false;
   app.on("before-quit", (event) => {
     markQuitting();
     if (engineStopped) return;
     event.preventDefault();
-    void engine.shutdown().then(() => {
+    void Promise.all([engine.shutdown(), flushSession(session.defaultSession)]).then(() => {
       engineStopped = true;
       app.quit();
     });

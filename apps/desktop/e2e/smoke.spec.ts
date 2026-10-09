@@ -1,4 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication } from "@playwright/test";
+import { execFileSync } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -42,6 +43,41 @@ test("quitting stops the engine cleanly", async () => {
   const text = readFileSync(log, "utf8");
   expect(text.slice(-2000)).toContain("chatter-engine stopped");
 });
+
+test("a cookie survives the app being killed a second after it changed", async () => {
+  // The update installer kills the app about 1.3 s after it starts, and
+  // Chatter's refresh cookie is single-use: one not on disk by then is a
+  // sign-out. A second session without prompt writes is the control.
+  await app.firstWindow();
+  const expirationDate = Date.now() / 1000 + 3600;
+  await app.evaluate(async ({ session }, expirationDate) => {
+    const cookie = { url: "http://localhost/", name: "refresh_token", value: "rotated", expirationDate };
+    await session.defaultSession.cookies.set(cookie);
+    await session.fromPartition("persist:control").cookies.set(cookie);
+  }, expirationDate);
+  await new Promise((r) => setTimeout(r, 1000));
+  killTree(app.process().pid!);
+  await new Promise((r) => setTimeout(r, 1000));
+
+  app = await electron.launch({
+    args: [join(__dirname, "..")],
+    env: { ...process.env, CHATTER_USER_DATA: profile },
+  });
+  await app.firstWindow();
+  const [kept, control] = await app.evaluate(async ({ session }) => {
+    const find = (s: Electron.Session) => s.cookies.get({ name: "refresh_token" }).then((c) => c[0]?.value ?? null);
+    return [await find(session.defaultSession), await find(session.fromPartition("persist:control"))];
+  });
+  expect(kept).toBe("rotated");
+  // If Chromium ever writes promptly by itself, the control shows it.
+  test.info().annotations.push({ type: "control", description: `without prompt writes: ${control ?? "lost"}` });
+});
+
+/** Kills the app and its helpers without letting them shut down, as the installer does. */
+function killTree(pid: number): void {
+  if (process.platform === "win32") execFileSync("taskkill", ["/F", "/T", "/PID", String(pid)], { stdio: "ignore" });
+  else process.kill(pid, "SIGKILL");
+}
 
 test("rejects an address that isn't a Chatter server", async () => {
   const page = await app.firstWindow();

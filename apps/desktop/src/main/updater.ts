@@ -1,5 +1,7 @@
-import { app, dialog, Notification } from "electron";
+import { app, dialog, Notification, session } from "electron";
 import electronUpdater from "electron-updater";
+import { engine } from "./engineHost";
+import { flushSession } from "./persistence";
 import { getPrefs } from "./serverStore";
 import { getMainWindow } from "./window";
 
@@ -17,6 +19,16 @@ function canUpdate(): boolean {
   if (!app.isPackaged || process.env["CHATTER_DISABLE_UPDATES"]) return false;
   if (process.platform === "linux" && !process.env["APPIMAGE"]) return false;
   return true;
+}
+
+/**
+ * quitAndInstall starts the installer straight away, and the installer kills
+ * whatever of Chatter is still running about 1.3 s later. So do what quitting
+ * has to do first: put the sign-in on disk and stop the engine.
+ */
+async function restartToUpdate(): Promise<void> {
+  await Promise.allSettled([flushSession(session.defaultSession), engine.shutdown()]);
+  autoUpdater.quitAndInstall();
 }
 
 let listening = false;
@@ -38,7 +50,7 @@ function init(): void {
       title: "Chatter update ready",
       body: `Version ${info.version} installs when you quit Chatter. Click to restart now.`,
     });
-    note.on("click", () => autoUpdater.quitAndInstall());
+    note.on("click", () => void restartToUpdate());
     note.show();
   });
 }
@@ -74,7 +86,7 @@ export async function checkForUpdatesNow(): Promise<void> {
       message: `Version ${downloaded} is ready.`,
       buttons: ["Restart now", "Later"],
     });
-    if (response === 0) autoUpdater.quitAndInstall();
+    if (response === 0) void restartToUpdate();
     return;
   }
   init();
