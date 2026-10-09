@@ -71,13 +71,20 @@ jobs:
         run: xvfb-run -a npx playwright test e2e/smoke.spec.ts
         working-directory: apps/desktop
 
-      - name: Package (unpacked)
-        run: npm run dist:dir -w apps/desktop
+      # Installers people can try straight from the run: the NSIS setup on
+      # Windows, the AppImage and .deb on Linux. Never published from here.
+      - name: Package
+        run: npx electron-builder --publish never
+        working-directory: apps/desktop
         env:
           CSC_IDENTITY_AUTO_DISCOVERY: "false"
 
       - uses: actions/upload-artifact@v4
         with:
-          name: chatter-desktop-${{ matrix.os }}
-          path: apps/desktop/dist/*-unpacked
-          retention-days: 7
+          name: chatter-desktop-${{ runner.os == 'Windows' && 'windows' || 'linux' }}
+          path: |
+            apps/desktop/dist/*.exe
+            apps/desktop/dist/*.AppImage
+            apps/desktop/dist/*.deb
+          if-no-files-found: error
+          retention-days: 14
