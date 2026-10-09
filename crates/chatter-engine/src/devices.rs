@@ -4,8 +4,28 @@
 //! WASAPI, ALSA and PipeWire). "default" means the system default and follows
 //! it when it changes.
 
+use std::sync::{Mutex, MutexGuard};
+
 use cpal::traits::{DeviceTrait, HostTrait};
 use serde::Serialize;
+
+/// One host for the engine's lifetime. On Linux every `cpal::default_host()`
+/// opens a PulseAudio connection whose reactor thread never exits, even once
+/// the host is dropped, so a host per call leaked a connection on every device
+/// poll until pipewire-pulse hit its client cap and refused every app.
+static HOST: Mutex<Option<cpal::Host>> = Mutex::new(None);
+
+fn host() -> MutexGuard<'static, Option<cpal::Host>> {
+    HOST.lock().unwrap_or_else(|e| e.into_inner())
+}
+
+/// Forget the host when its server went away (pipewire-pulse restarted), so
+/// the next call reconnects. A dead connection's thread has already exited.
+fn forget_if_gone(slot: &mut Option<cpal::Host>, err: &cpal::Error) {
+    if err.kind() == cpal::ErrorKind::StreamInvalidated {
+        *slot = None;
+    }
+}
 
 #[derive(Debug, Clone, PartialEq, Eq, Serialize)]
 pub struct AudioDevice {
@@ -29,18 +49,23 @@ fn describe(device: &cpal::Device) -> Option<AudioDevice> {
 }
 
 pub fn list() -> DeviceList {
-    let host = cpal::default_host();
+    let mut slot = host();
+    let host = slot.get_or_insert_with(cpal::default_host);
     let default = |label: &str| AudioDevice {
         id: "default".into(),
         label: label.into(),
     };
     let mut inputs = vec![default("Default")];
     let mut outputs = vec![default("Default")];
-    if let Ok(devices) = host.input_devices() {
-        inputs.extend(devices.filter_map(|d| describe(&d)));
+    let found_inputs = host.input_devices();
+    let found_outputs = host.output_devices();
+    match found_inputs {
+        Ok(devices) => inputs.extend(devices.filter_map(|d| describe(&d))),
+        Err(e) => forget_if_gone(&mut slot, &e),
     }
-    if let Ok(devices) = host.output_devices() {
-        outputs.extend(devices.filter_map(|d| describe(&d)));
+    match found_outputs {
+        Ok(devices) => outputs.extend(devices.filter_map(|d| describe(&d))),
+        Err(e) => forget_if_gone(&mut slot, &e),
     }
     DeviceList { inputs, outputs }
 }
@@ -48,13 +73,15 @@ pub fn list() -> DeviceList {
 /// The device for an id from `list()`, the default when it is "default" or
 /// no longer exists (unplugged, or an id saved by the browser's stack).
 pub fn input(id: &str) -> Option<cpal::Device> {
-    let host = cpal::default_host();
-    by_id(&host, id, true).or_else(|| host.default_input_device())
+    let mut slot = host();
+    let host = slot.get_or_insert_with(cpal::default_host);
+    by_id(host, id, true).or_else(|| host.default_input_device())
 }
 
 pub fn output(id: &str) -> Option<cpal::Device> {
-    let host = cpal::default_host();
-    by_id(&host, id, false).or_else(|| host.default_output_device())
+    let mut slot = host();
+    let host = slot.get_or_insert_with(cpal::default_host);
+    by_id(host, id, false).or_else(|| host.default_output_device())
 }
 
 fn by_id(host: &cpal::Host, id: &str, input: bool) -> Option<cpal::Device> {
