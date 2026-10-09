@@ -59,13 +59,36 @@ struct Ducking {
     applied: Option<Option<u32>>,
 }
 
+/// Where the ducker records what it has turned down, so a run that was killed
+/// is undone by the next: the app's profile when it says, else the temp dir.
+fn ducking_journal() -> std::path::PathBuf {
+    std::env::var_os("CHATTER_ENGINE_STATE_DIR")
+        .map(std::path::PathBuf::from)
+        .unwrap_or_else(std::env::temp_dir)
+        .join("chatter-ducking.json")
+}
+
 impl Ducking {
+    /// A previous run left other apps turned down: start the ducker now, which
+    /// puts them back, rather than waiting for ducking to be switched on.
+    fn recovering() -> Self {
+        let mut ducking = Ducking::default();
+        if ducking_journal().exists() {
+            ducking.start();
+        }
+        ducking
+    }
+
+    fn start(&mut self) {
+        // Never our own sound: the engine, and the app that started it.
+        let mut own = vec![std::process::id()];
+        own.extend(crate::processes::parent_pid());
+        self.ducker = Some(Ducker::new(own, Some(ducking_journal())));
+    }
+
     fn apply(&mut self) {
         if self.amount > 0.0 && self.ducker.is_none() {
-            // Never our own sound: the engine, and the app that started it.
-            let mut own = vec![std::process::id()];
-            own.extend(crate::processes::parent_pid());
-            self.ducker = Some(Ducker::new(own));
+            self.start();
         }
         if let Some(ducker) = &self.ducker {
             let duck = self.talking && self.amount > 0.0;
@@ -112,7 +135,7 @@ impl Engine {
             hotkeys,
             app_audio: HashMap::new(),
             next_stream: 1,
-            ducking: Arc::default(),
+            ducking: Arc::new(parking_lot::Mutex::new(Ducking::recovering())),
         }
     }
 

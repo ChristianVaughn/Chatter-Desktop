@@ -736,6 +736,14 @@ impl VolumeBackend for WinVolumes {
     type Key = String;
     type Vol = f32;
 
+    fn vol_to_vec(v: &f32) -> Vec<f64> {
+        vec![f64::from(*v)]
+    }
+
+    fn vol_from_vec(v: &[f64]) -> Option<f32> {
+        v.first().map(|x| (*x as f32).clamp(0.0, 1.0))
+    }
+
     fn scan(&mut self) -> anyhow::Result<Vec<(String, f32)>> {
         let table = snapshot();
         self.controls.clear();
@@ -790,7 +798,11 @@ impl VolumeBackend for WinVolumes {
 }
 
 /// Body of the ducking thread.
-pub(crate) fn run_ducker(filter: Filter, rx: mpsc::Receiver<crate::duck::Cmd>) {
+pub(crate) fn run_ducker(
+    filter: Filter,
+    journal: Option<std::path::PathBuf>,
+    rx: mpsc::Receiver<crate::duck::Cmd>,
+) {
     // SAFETY: COM init for this thread, balanced below after the backend is dropped.
     if let Err(e) = unsafe { CoInitializeEx(None, COINIT_MULTITHREADED) }.ok() {
         log::error!("appaudio: ducking unavailable: CoInitializeEx: {e}");
@@ -803,6 +815,7 @@ pub(crate) fn run_ducker(filter: Filter, rx: mpsc::Receiver<crate::duck::Cmd>) {
             filter,
             controls: HashMap::new(),
         },
+        journal,
         rx,
     );
     // SAFETY: balances CoInitializeEx; the backend (and its COM objects) is dropped.
@@ -1081,10 +1094,13 @@ mod tests {
 
         // Exclusion wins: the child is in this test process's tree.
         {
-            let d = Ducker::with_filter(Filter {
-                exclude: vec![std::process::id()],
-                only: Some(vec![pid]),
-            });
+            let d = Ducker::with_filter(
+                Filter {
+                    exclude: vec![std::process::id()],
+                    only: Some(vec![pid]),
+                },
+                None,
+            );
             d.set(Some(0.2));
             sleep(400);
             let v = session_volume(pid).unwrap();
@@ -1096,10 +1112,13 @@ mod tests {
         sleep(500);
         let a1 = len();
 
-        let d = Ducker::with_filter(Filter {
-            exclude: vec![],
-            only: Some(vec![pid]),
-        });
+        let d = Ducker::with_filter(
+            Filter {
+                exclude: vec![],
+                only: Some(vec![pid]),
+            },
+            None,
+        );
         d.set(Some(0.2));
         d.set(Some(0.2)); // repeated value: no-op
         sleep(300);
@@ -1154,5 +1173,59 @@ mod tests {
         let ratio = ra / rb.max(1e-9);
         assert!((4.0..6.5).contains(&ratio), "rms ratio {ratio}");
         assert!((rc / ra - 1.0).abs() < 0.1, "restored rms {rc} vs {ra}");
+    }
+
+    #[test]
+    #[ignore = "needs an audio output device"]
+    fn a_ducker_that_never_restored_is_undone_by_the_next() {
+        use crate::duck::{Ducker, Filter};
+        let dir = std::env::temp_dir().join(format!("chatter-duck-crash-{}", std::process::id()));
+        let journal = dir.join("ducking.json");
+        let mut child = spawn_tone_player(&dir, 8.0);
+        let pid = child.id();
+        let sleep = |ms| std::thread::sleep(Duration::from_millis(ms));
+        let only = || Filter {
+            exclude: vec![],
+            only: Some(vec![pid]),
+        };
+
+        let t = Instant::now();
+        let orig = loop {
+            if let Some(v) = session_volume(pid) {
+                break v;
+            }
+            assert!(
+                t.elapsed() < Duration::from_secs(8),
+                "child session never appeared"
+            );
+            sleep(50);
+        };
+
+        // Duck, then lose the ducker without its restore, as a killed engine would.
+        let d = Ducker::with_filter(only(), Some(journal.clone()));
+        d.set(Some(0.2));
+        sleep(400);
+        let ducked = session_volume(pid).unwrap();
+        assert!(journal.exists(), "journal written while ducked");
+        std::mem::forget(d);
+
+        // The next ducker (the restarted engine) puts it back before anything else.
+        let next = Ducker::with_filter(only(), Some(journal.clone()));
+        sleep(300);
+        let recovered = session_volume(pid).unwrap();
+        drop(next);
+
+        let _ = child.kill();
+        let _ = child.wait();
+        let _ = std::fs::remove_dir_all(&dir);
+        println!(
+            "volume: original {orig:.3}, ducked {ducked:.3}, after the next ducker {recovered:.3}"
+        );
+        assert!((ducked - 0.2 * orig).abs() < 0.01, "ducked volume {ducked}");
+        assert!(
+            (recovered - orig).abs() < 1e-3,
+            "recovered volume {recovered}"
+        );
+        assert!(!journal.exists(), "journal removed once recovered");
     }
 }

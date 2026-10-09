@@ -16,15 +16,17 @@
 //! `set` call, ~1 s while ducked, plus change notifications on Linux) and right before
 //! restoring; no OS event sinks are needed.
 //!
-//! Crash safety: nothing is persisted. If the engine dies while ducked the sessions stay
-//! quiet. On Windows a session's volume belongs to that session and is gone when the app
-//! restarts (though Windows may remember per-app mixer levels for some apps); on Linux the
-//! stream volume dies with the stream (stream-restore may remember it per app). The ramp-up on
-//! [`Ducker`] drop and the synchronous restore keep this to genuine crashes.
+//! Crash safety: while anything is ducked, the managed sessions (original volume and what we
+//! last set) are kept in a small journal file. If the process dies before restoring, the next
+//! [`Ducker`] given the same journal puts back every session that still exists and still has
+//! the volume we left it at; a session the user has changed since, or one that has gone, is
+//! left alone. A clean drop restores synchronously and removes the journal.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt::Debug;
 use std::hash::Hash;
+use std::path::PathBuf;
+use std::str::FromStr;
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, Sender};
 use std::sync::Mutex;
 use std::thread::JoinHandle;
@@ -126,8 +128,12 @@ impl Filter {
 
 /// Platform access to per-application volumes.
 pub(crate) trait VolumeBackend {
-    type Key: Eq + Hash + Clone + Debug;
+    /// Written to the crash journal as a string, so it must survive `to_string`/`parse`.
+    type Key: Eq + Hash + Clone + Debug + ToString + FromStr;
     type Vol: Clone + Debug;
+    /// A volume as plain numbers for the crash journal, and back.
+    fn vol_to_vec(v: &Self::Vol) -> Vec<f64>;
+    fn vol_from_vec(v: &[f64]) -> Option<Self::Vol>;
     /// Every session/stream we may touch (filter applied) with its current volume.
     fn scan(&mut self) -> anyhow::Result<Vec<(Self::Key, Self::Vol)>>;
     /// `original` scaled by `factor` (0..=1). Must return `original` unchanged for 1.0.
@@ -156,6 +162,10 @@ struct Managed<V> {
 /// The ducking state machine, driven by [`run`].
 pub(crate) struct DuckState<B: VolumeBackend> {
     sessions: HashMap<B::Key, Managed<B::Vol>>,
+    /// Where the managed sessions are recorded while ducked (see the module docs).
+    journal: Option<PathBuf>,
+    /// The sessions changed since the journal was last written.
+    journal_stale: bool,
     /// Sessions the user took over during this duck cycle: left alone until restore.
     released: HashSet<B::Key>,
     target: Option<f32>,
@@ -167,6 +177,8 @@ impl<B: VolumeBackend> DuckState<B> {
     pub fn new(now: Instant) -> Self {
         DuckState {
             sessions: HashMap::new(),
+            journal: None,
+            journal_stale: false,
             released: HashSet::new(),
             target: None,
             ramp: Ramp::unity(now),
@@ -195,8 +207,10 @@ impl<B: VolumeBackend> DuckState<B> {
                     );
                     self.sessions.remove(&key);
                     self.released.insert(key);
+                    self.journal_stale = true;
                 }
             } else if adopt && !self.released.contains(&key) {
+                self.journal_stale = true;
                 self.sessions.insert(
                     key,
                     Managed {
@@ -206,7 +220,9 @@ impl<B: VolumeBackend> DuckState<B> {
                 );
             }
         }
+        let before = self.sessions.len();
         self.sessions.retain(|k, _| present.contains(k));
+        self.journal_stale |= self.sessions.len() != before;
         self.released.retain(|k| present.contains(k));
     }
 
@@ -216,6 +232,7 @@ impl<B: VolumeBackend> DuckState<B> {
             let v = B::scaled(&m.original, factor);
             if !B::same(&v, &m.last_set) && b.set(key, &v) {
                 m.last_set = v;
+                self.journal_stale = true;
             }
         }
     }
@@ -235,6 +252,72 @@ impl<B: VolumeBackend> DuckState<B> {
         b.flush();
         self.sessions.clear();
         self.released.clear();
+        self.write_journal();
+    }
+
+    /// Records the managed sessions, or removes the journal when there are none.
+    fn write_journal(&mut self) {
+        self.journal_stale = false;
+        let Some(path) = &self.journal else { return };
+        if self.sessions.is_empty() {
+            let _ = std::fs::remove_file(path);
+            return;
+        }
+        let entries: Vec<JournalEntry> = self
+            .sessions
+            .iter()
+            .map(|(key, m)| JournalEntry {
+                key: key.to_string(),
+                original: B::vol_to_vec(&m.original),
+                last_set: B::vol_to_vec(&m.last_set),
+            })
+            .collect();
+        // Written beside and renamed over, so a crash mid-write leaves the old journal.
+        let tmp = path.with_extension("tmp");
+        let written = serde_json::to_vec(&entries)
+            .map_err(anyhow::Error::from)
+            .and_then(|json| Ok(std::fs::write(&tmp, json)?))
+            .and_then(|()| Ok(std::fs::rename(&tmp, path)?));
+        if let Err(e) = written {
+            log::warn!("appaudio: can't write the ducking journal: {e:#}");
+        }
+    }
+
+    /// Puts back what a previous run left ducked (see the module docs).
+    fn recover(&mut self, b: &mut B) {
+        let Some(path) = &self.journal else { return };
+        let Ok(text) = std::fs::read(path) else {
+            return;
+        };
+        let entries: Vec<JournalEntry> = serde_json::from_slice(&text).unwrap_or_default();
+        let current: HashMap<String, B::Vol> = match b.scan() {
+            Ok(c) => c.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
+            Err(e) => {
+                log::warn!("appaudio: can't check what a previous run ducked: {e:#}");
+                return;
+            }
+        };
+        let mut restored = 0;
+        for entry in entries {
+            let (Some(original), Some(last_set), Ok(key)) = (
+                B::vol_from_vec(&entry.original),
+                B::vol_from_vec(&entry.last_set),
+                entry.key.parse::<B::Key>(),
+            ) else {
+                continue;
+            };
+            let untouched = current
+                .get(&entry.key)
+                .is_some_and(|v| B::same(v, &last_set));
+            if untouched && b.set(&key, &original) {
+                restored += 1;
+            }
+        }
+        b.flush();
+        if restored > 0 {
+            log::info!("appaudio: restored {restored} app volume(s) a previous run left lowered");
+        }
+        let _ = std::fs::remove_file(path);
     }
 
     fn command(&mut self, b: &mut B, level: Option<f32>, now: Instant) {
@@ -261,6 +344,9 @@ impl<B: VolumeBackend> DuckState<B> {
         self.apply(b, self.ramp.value(now));
         if self.target.is_none() && !ramping {
             self.restore(b);
+        } else if self.journal_stale && !ramping {
+            // Once settled rather than on every ramp step.
+            self.write_journal();
         }
     }
 
@@ -275,13 +361,23 @@ impl<B: VolumeBackend> DuckState<B> {
     }
 }
 
+#[derive(serde::Serialize, serde::Deserialize)]
+struct JournalEntry {
+    key: String,
+    original: Vec<f64>,
+    last_set: Vec<f64>,
+}
+
 pub(crate) enum Cmd {
     Set(Option<f32>),
 }
 
 /// Runs the ducking loop until the command channel closes, then restores synchronously.
-pub(crate) fn run<B: VolumeBackend>(mut b: B, rx: Receiver<Cmd>) {
+/// First puts back anything a previous run recorded in `journal` and never restored.
+pub(crate) fn run<B: VolumeBackend>(mut b: B, journal: Option<PathBuf>, rx: Receiver<Cmd>) {
     let mut st = DuckState::<B>::new(Instant::now());
+    st.journal = journal;
+    st.recover(&mut b);
     loop {
         let msg = match st.timeout(&b, Instant::now()) {
             Some(t) => rx.recv_timeout(t),
@@ -326,16 +422,22 @@ impl Ducker {
     /// A ducker that never touches sessions/streams of `exclude_pids` or their process trees
     /// (our app: Electron's main process and the engine). Nothing changes until
     /// [`set`](Self::set) is called.
-    pub fn new(exclude_pids: Vec<u32>) -> Ducker {
-        Self::with_filter(Filter {
-            exclude: exclude_pids,
-            only: None,
-        })
+    ///
+    /// With a `journal` path, what is ducked is recorded there, and a ducker started after a
+    /// crash puts it back first (see the module docs).
+    pub fn new(exclude_pids: Vec<u32>, journal: Option<PathBuf>) -> Ducker {
+        Self::with_filter(
+            Filter {
+                exclude: exclude_pids,
+                only: None,
+            },
+            journal,
+        )
     }
 
-    pub(crate) fn with_filter(filter: Filter) -> Ducker {
+    pub(crate) fn with_filter(filter: Filter, journal: Option<PathBuf>) -> Ducker {
         let (tx, rx) = mpsc::channel();
-        let thread = spawn_backend(filter, rx);
+        let thread = spawn_backend(filter, journal, rx);
         Ducker {
             tx: thread.as_ref().map(|_| tx),
             last: Mutex::new(None),
@@ -369,14 +471,18 @@ impl Drop for Ducker {
     }
 }
 
-fn spawn_backend(filter: Filter, rx: Receiver<Cmd>) -> Option<JoinHandle<()>> {
+fn spawn_backend(
+    filter: Filter,
+    journal: Option<PathBuf>,
+    rx: Receiver<Cmd>,
+) -> Option<JoinHandle<()>> {
     #[cfg(windows)]
-    let body = move || crate::wasapi::run_ducker(filter, rx);
+    let body = move || crate::wasapi::run_ducker(filter, journal, rx);
     #[cfg(target_os = "linux")]
-    let body = move || crate::pulse::run_ducker(filter, rx);
+    let body = move || crate::pulse::run_ducker(filter, journal, rx);
     #[cfg(not(any(windows, target_os = "linux")))]
     {
-        let _ = (filter, rx);
+        let _ = (filter, journal, rx);
         return None;
     }
     #[cfg(any(windows, target_os = "linux"))]
@@ -452,6 +558,12 @@ mod tests {
     impl VolumeBackend for Fake {
         type Key = u32;
         type Vol = f32;
+        fn vol_to_vec(v: &f32) -> Vec<f64> {
+            vec![f64::from(*v)]
+        }
+        fn vol_from_vec(v: &[f64]) -> Option<f32> {
+            v.first().map(|x| *x as f32)
+        }
         fn scan(&mut self) -> anyhow::Result<Vec<(u32, f32)>> {
             Ok(self.vols.iter().map(|(k, v)| (*k, *v)).collect())
         }
@@ -500,6 +612,52 @@ mod tests {
         let sets = b.sets;
         st.tick(&mut b, t1 + ms(2000));
         assert_eq!(b.sets, sets);
+    }
+
+    fn journal_path(name: &str) -> PathBuf {
+        std::env::temp_dir().join(format!("chatter-duck-{name}-{}.json", std::process::id()))
+    }
+
+    #[test]
+    fn a_crash_while_ducked_is_undone_next_time() {
+        let journal = journal_path("crash");
+        let _ = std::fs::remove_file(&journal);
+        let mut b = Fake::default();
+        b.vols.insert(1, 0.8);
+        b.vols.insert(2, 0.5);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.journal = Some(journal.clone());
+        st.command(&mut b, Some(0.25), t0);
+        st.tick(&mut b, t0 + ms(200));
+        assert!(journal.exists(), "recorded once settled");
+        // The process dies here, with no restore. Meanwhile the user turns app 2 up.
+        drop(st);
+        b.vols.insert(2, 0.9);
+
+        let mut next = DuckState::<Fake>::new(Instant::now());
+        next.journal = Some(journal.clone());
+        next.recover(&mut b);
+        assert_eq!(b.vols[&1], 0.8, "put back");
+        assert_eq!(b.vols[&2], 0.9, "the user's change stands");
+        assert!(!journal.exists());
+    }
+
+    #[test]
+    fn a_clean_restore_leaves_no_journal() {
+        let journal = journal_path("clean");
+        let mut b = Fake::default();
+        b.vols.insert(1, 1.0);
+        let t0 = Instant::now();
+        let mut st = DuckState::<Fake>::new(t0);
+        st.journal = Some(journal.clone());
+        st.command(&mut b, Some(0.5), t0);
+        st.tick(&mut b, t0 + ms(200));
+        assert!(journal.exists());
+        st.command(&mut b, None, t0 + ms(300));
+        st.tick(&mut b, t0 + ms(700));
+        assert_eq!(b.vols[&1], 1.0);
+        assert!(!journal.exists());
     }
 
     #[test]

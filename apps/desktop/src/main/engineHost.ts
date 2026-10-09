@@ -76,7 +76,9 @@ export class EngineHost {
       this.resolveHello(null);
       return;
     }
-    const env = { ...process.env };
+    // The engine keeps its crash journal (what it has turned down) in the
+    // profile, so another profile's engine never undoes this one's.
+    const env: NodeJS.ProcessEnv = { ...process.env, CHATTER_ENGINE_STATE_DIR: app.getPath("userData") };
     // GNOME's GlobalShortcuts portal wants the app's .desktop id for an
     // unsandboxed app (electron-builder names it after executableName).
     if (process.platform === "linux") env["CHATTER_HOTKEYS_APP_ID"] ??= "chatter-desktop";

@@ -705,6 +705,22 @@ impl VolumeBackend for PulseVolumes {
     type Key = u32;
     type Vol = ChannelVolumes;
 
+    fn vol_to_vec(v: &ChannelVolumes) -> Vec<f64> {
+        v.get().iter().map(|c| f64::from(c.0)).collect()
+    }
+
+    fn vol_from_vec(v: &[f64]) -> Option<ChannelVolumes> {
+        let channels = u8::try_from(v.len())
+            .ok()
+            .filter(|n| (1..=ChannelVolumes::CHANNELS_MAX).contains(n))?;
+        let mut out = ChannelVolumes::default();
+        out.set_len(channels);
+        for (slot, x) in out.get_mut().iter_mut().zip(v) {
+            *slot = Volume(*x as u32);
+        }
+        out.is_valid().then_some(out)
+    }
+
     fn scan(&mut self) -> anyhow::Result<Vec<(u32, ChannelVolumes)>> {
         let (inputs, _) = self.ensure_conn()?.list()?;
         let table = snapshot();
@@ -777,7 +793,11 @@ impl VolumeBackend for PulseVolumes {
 
 /// Body of the ducking thread. Connects lazily (on the first scan), so a missing server only
 /// makes `set` a no-op; it is retried on later scans.
-pub(crate) fn run_ducker(filter: Filter, rx: mpsc::Receiver<crate::duck::Cmd>) {
+pub(crate) fn run_ducker(
+    filter: Filter,
+    journal: Option<std::path::PathBuf>,
+    rx: mpsc::Receiver<crate::duck::Cmd>,
+) {
     crate::duck::run(
         PulseVolumes {
             filter,
@@ -785,6 +805,7 @@ pub(crate) fn run_ducker(filter: Filter, rx: mpsc::Receiver<crate::duck::Cmd>) {
             dirty: Arc::new(AtomicBool::new(false)),
             pending: Vec::new(),
         },
+        journal,
         rx,
     );
 }

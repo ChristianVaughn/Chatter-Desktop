@@ -315,6 +315,7 @@ dependencies = [
  "libpulse-binding",
  "log",
  "serde",
+ "serde_json",
  "windows",
  "windows-core",
 ]
