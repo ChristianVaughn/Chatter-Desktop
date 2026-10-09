@@ -41,6 +41,16 @@ enum Command {
     Totp { username: String },
     /// Log in and print a short-lived access token (for driving a browser test).
     Token { username: String },
+    /// Open a spare WebSocket as this user, hold it, then close it — as a
+    /// second tab or device would.
+    Connect {
+        username: String,
+        #[arg(long, default_value_t = 3)]
+        seconds: u64,
+        /// Identify as the desktop app in the first frame.
+        #[arg(long)]
+        desktop: bool,
+    },
     /// Create a room owned by the first user, join the others, and print the
     /// room and its voice channel.
     SetupRoom {
@@ -117,6 +127,12 @@ async fn main() -> Result<()> {
                     .await?
                     .access_token
             );
+        }
+        Command::Connect { username, seconds, desktop } => {
+            let session = api::login(&server, &username, &stored(&store, &server, &username)?).await?;
+            let (_outbox, _inbox) = signaling::connect_as(&session.ws_url()?, &session.access_token, desktop).await?;
+            tokio::time::sleep(Duration::from_secs(seconds)).await;
+            println!("closed the spare connection for {username}");
         }
         Command::SetupRoom { name, usernames } => {
             let owner = api::login(

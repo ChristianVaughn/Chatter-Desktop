@@ -2,6 +2,7 @@ import { _electron as electron, expect, test, type ElectronApplication } from "@
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { quit } from "./chatter";
 
 // Runs against the built app (`npm run build` first). Tests that need a live
 // Chatter server read its address from CHATTER_E2E_SERVER and are skipped
@@ -20,10 +21,8 @@ test.beforeEach(async () => {
 });
 
 test.afterEach(async () => {
-  // Closing the window only hides it to the tray; quit for real.
-  await app.evaluate(({ app }) => app.quit());
-  await app.close().catch(() => {});
-  rmSync(profile, { recursive: true, force: true });
+  await quit(app);
+  rmSync(profile, { recursive: true, force: true, maxRetries: 5 });
 });
 
 test("first launch asks for a server", async () => {

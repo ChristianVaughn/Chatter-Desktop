@@ -22,15 +22,26 @@ pub async fn connect(
     url: &str,
     access_token: &str,
 ) -> Result<(Outbox, mpsc::UnboundedReceiver<Value>)> {
+    connect_as(url, access_token, false).await
+}
+
+/// As [`connect`], optionally identifying as the desktop app.
+pub async fn connect_as(
+    url: &str,
+    access_token: &str,
+    desktop: bool,
+) -> Result<(Outbox, mpsc::UnboundedReceiver<Value>)> {
     let (socket, _) = tokio_tungstenite::connect_async(url)
         .await
         .context("websocket connect")?;
     let (mut sink, mut stream) = socket.split();
 
     // The first frame authenticates; it has no "type".
-    sink.send(Message::text(
-        json!({ "access_token": access_token, "is_mobile": false }).to_string(),
-    ))
+    let mut hello = json!({ "access_token": access_token, "is_mobile": false });
+    if desktop {
+        hello["client"] = json!({ "kind": "desktop", "version": env!("CARGO_PKG_VERSION") });
+    }
+    sink.send(Message::text(hello.to_string()))
     .await?;
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
