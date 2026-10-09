@@ -11,9 +11,15 @@ export interface WindowBounds {
   maximized: boolean;
 }
 
+/** A push-to-talk key as a DOM `KeyboardEvent.code`, or "Mouse3"–"Mouse5". */
+export interface PttBindingConfig {
+  code: string;
+}
+
 interface Config {
   serverOrigin?: string;
   window?: WindowBounds;
+  pttBinding?: PttBindingConfig | null;
 }
 
 const configPath = () => join(app.getPath("userData"), "config.json");
@@ -42,6 +48,18 @@ export function getServerOrigin(): string | null {
 
 export function setServerOrigin(origin: string): void {
   load().serverOrigin = origin;
+  save();
+}
+
+export const DEFAULT_PTT_BINDING: PttBindingConfig = { code: "Backquote" };
+
+/** The saved push-to-talk key; the web client's backtick until changed. */
+export function getPttBinding(): PttBindingConfig {
+  return load().pttBinding ?? DEFAULT_PTT_BINDING;
+}
+
+export function setPttBinding(binding: PttBindingConfig | null): void {
+  load().pttBinding = binding;
   save();
 }
 

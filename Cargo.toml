@@ -1,6 +1,6 @@
 [workspace]
 resolver = "2"
-members = ["crates/chatter-media", "crates/chatter-testclient"]
+members = ["crates/chatter-media", "crates/chatter-testclient", "crates/chatter-engine", "crates/chatter-hotkeys"]
 
 [workspace.package]
 edition = "2021"

@@ -11,8 +11,14 @@ export const IPC = {
   changeServer: "shell:change-server",
   pickerGetSources: "picker:get-sources",
   pickerChoose: "picker:choose",
+  keybindDone: "keybind:done",
   // Remote pages (served by the user's Chatter server)
   remoteFocus: "remote:focus",
+  engineRequest: "engine:request",
+  engineEvent: "engine:event",
+  pttGet: "ptt:get",
+  pttCapture: "ptt:capture",
+  pttClear: "ptt:clear",
 } as const;
 
 export type PreloadRole =
@@ -53,4 +59,5 @@ export interface ShellApi {
   changeServer(): Promise<void>;
   pickerGetSources(): Promise<CaptureSource[]>;
   pickerChoose(id: string | null): Promise<void>;
+  keybindDone(code: string | null): Promise<void>;
 }

@@ -26,6 +26,7 @@ export default defineConfig({
           server: resolve(__dirname, "src/shell-ui/server.html"),
           picker: resolve(__dirname, "src/shell-ui/picker.html"),
           offline: resolve(__dirname, "src/shell-ui/offline.html"),
+          keybind: resolve(__dirname, "src/shell-ui/keybind.html"),
         },
       },
     },

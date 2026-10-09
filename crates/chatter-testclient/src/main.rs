@@ -128,9 +128,15 @@ async fn main() -> Result<()> {
                     .access_token
             );
         }
-        Command::Connect { username, seconds, desktop } => {
-            let session = api::login(&server, &username, &stored(&store, &server, &username)?).await?;
-            let (_outbox, _inbox) = signaling::connect_as(&session.ws_url()?, &session.access_token, desktop).await?;
+        Command::Connect {
+            username,
+            seconds,
+            desktop,
+        } => {
+            let session =
+                api::login(&server, &username, &stored(&store, &server, &username)?).await?;
+            let (_outbox, _inbox) =
+                signaling::connect_as(&session.ws_url()?, &session.access_token, desktop).await?;
             tokio::time::sleep(Duration::from_secs(seconds)).await;
             println!("closed the spare connection for {username}");
         }

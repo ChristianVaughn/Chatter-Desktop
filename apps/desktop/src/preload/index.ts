@@ -1,5 +1,6 @@
 import { contextBridge, ipcRenderer } from "electron";
 import { IPC, type PreloadRole, type ShellApi } from "../shared/ipc";
+import { installDesktopBridge, type EngineChannel } from "./mainWorld";
 
 // The main process decides what this page is from its frame URL; the page
 // itself has no say. Anything else (a stray iframe, a foreign origin) gets
@@ -15,13 +16,33 @@ if (role.role === "shell") {
     changeServer: () => ipcRenderer.invoke(IPC.changeServer),
     pickerGetSources: () => ipcRenderer.invoke(IPC.pickerGetSources),
     pickerChoose: (id) => ipcRenderer.invoke(IPC.pickerChoose, id),
+    keybindDone: (code) => ipcRenderer.invoke(IPC.keybindDone, code),
   };
   contextBridge.exposeInMainWorld("shellApi", api);
 } else if (role.role === "remote") {
-  contextBridge.exposeInMainWorld("chatterDesktop", Object.freeze({ ...role.info }));
+  // The channel to chatter-engine. The main process checks every request's
+  // origin and operation; this only carries them.
+  const eventListeners = new Set<(event: { ev: string }) => void>();
+  ipcRenderer.on(IPC.engineEvent, (_e, event: { ev: string }) => eventListeners.forEach((l) => l(event)));
+  const channel: EngineChannel = {
+    request: (op, args) => ipcRenderer.invoke(IPC.engineRequest, op, args ?? {}),
+    onEvent: (listener) => void eventListeners.add(listener),
+    pttGet: () => ipcRenderer.invoke(IPC.pttGet),
+    pttCapture: () => ipcRenderer.invoke(IPC.pttCapture),
+    pttClear: () => ipcRenderer.invoke(IPC.pttClear),
+  };
+  contextBridge.exposeInMainWorld("__chatterEngine", channel);
   contextBridge.exposeInMainWorld("__chatterShell", {
     focus: () => ipcRenderer.send(IPC.remoteFocus),
   });
+
+  // window.chatterDesktop, built in the page's world so the voice backend's
+  // objects behave like the browser objects they stand in for.
+  try {
+    contextBridge.executeInMainWorld({ func: installDesktopBridge, args: [role.info] });
+  } catch (err) {
+    console.error("[desktop] could not install the bridge", err);
+  }
 
   // The client raises `new Notification(...)` and calls window.focus() on
   // click, which can't bring back a window hidden in the tray. Wrap the

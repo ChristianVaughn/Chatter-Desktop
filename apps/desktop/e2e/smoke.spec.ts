@@ -48,7 +48,9 @@ test("connects to a server and exposes the bridge", async () => {
   await page.waitForURL(`${new URL(SERVER!).origin}/`);
 
   const bridge = await page.evaluate(() => (window as unknown as { chatterDesktop?: unknown }).chatterDesktop);
-  expect(bridge).toMatchObject({ bridgeVersion: 1, features: [] });
+  expect(bridge).toMatchObject({ bridgeVersion: 1 });
+  // With chatter-engine built, the native features are on offer.
+  expect((bridge as { features: string[] }).features).toEqual(expect.arrayContaining(["voice-backend@1", "ptt"]));
   expect(await page.evaluate(() => "shellApi" in window)).toBe(false);
   // Notification clicks restore the window from the tray.
   expect(await page.evaluate(() => Notification.name)).toBe("DesktopNotification");

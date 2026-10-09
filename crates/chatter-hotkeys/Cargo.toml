@@ -1,0 +1,27 @@
+[package]
+name = "chatter-hotkeys"
+description = "System-wide push-to-talk key/mouse-button watcher for Chatter Desktop (observe only)."
+edition.workspace = true
+license.workspace = true
+version.workspace = true
+publish = false
+
+[dependencies]
+anyhow = "1"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+
+[target.'cfg(windows)'.dependencies]
+windows-sys = { version = "0.61", features = [
+    "Win32_Foundation",
+    "Win32_System_LibraryLoader",
+    "Win32_System_Threading",
+    "Win32_UI_Input_KeyboardAndMouse",
+    "Win32_UI_WindowsAndMessaging",
+] }
+
+[target.'cfg(target_os = "linux")'.dependencies]
+x11rb = { version = "0.14", features = ["xinput"] }
+ashpd = { version = "0.13", default-features = false, features = ["tokio", "global_shortcuts"] }
+tokio = { version = "1", features = ["rt", "sync", "macros"] }
+futures-util = "0.3"

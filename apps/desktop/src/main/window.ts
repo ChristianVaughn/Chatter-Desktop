@@ -3,6 +3,7 @@ import { join } from "node:path";
 import icon from "../../resources/icon.png?asset";
 import { applyUnreadCount, unreadFromTitle } from "./badge";
 import { attachContextMenu } from "./contextMenu";
+import { resetEngineOnNavigation } from "./engineBridge";
 import { attachNavigationLock } from "./navLock";
 import { getServerOrigin, getWindowBounds, setWindowBounds } from "./serverStore";
 import { shellPageUrl } from "./shellPages";
@@ -81,6 +82,7 @@ export function createMainWindow(): BrowserWindow {
   const contents = window.webContents;
   attachNavigationLock(contents);
   attachContextMenu(contents);
+  resetEngineOnNavigation(contents);
 
   contents.on("page-title-updated", (_event, title) => {
     const unread = unreadFromTitle(title);

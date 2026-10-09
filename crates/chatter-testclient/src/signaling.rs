@@ -41,8 +41,7 @@ pub async fn connect_as(
     if desktop {
         hello["client"] = json!({ "kind": "desktop", "version": env!("CARGO_PKG_VERSION") });
     }
-    sink.send(Message::text(hello.to_string()))
-    .await?;
+    sink.send(Message::text(hello.to_string())).await?;
 
     let (out_tx, mut out_rx) = mpsc::unbounded_channel::<String>();
     tokio::spawn(async move {

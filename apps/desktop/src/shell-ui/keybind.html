@@ -1,0 +1,22 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta http-equiv="Content-Security-Policy" content="default-src 'self'; img-src 'self' data:; style-src 'self' 'unsafe-inline'" />
+    <title>Push-to-talk key</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <main class="center">
+      <div class="card" id="capture" tabindex="0">
+        <h1>Press your push-to-talk key</h1>
+        <p>Any key, or a side mouse button. Esc to cancel.</p>
+        <div class="row">
+          <button type="button" id="cancel">Cancel</button>
+        </div>
+      </div>
+    </main>
+    <script type="module" src="./keybind.ts"></script>
+  </body>
+</html>

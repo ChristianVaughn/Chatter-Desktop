@@ -58,6 +58,7 @@ export function totp(secret: string): string {
 export async function launchAt(
   extraArgs: string[] = [],
   persistentProfile?: string,
+  env: Record<string, string> = {},
 ): Promise<{ app: ElectronApplication; profile: string }> {
   const profile = persistentProfile
     ? join(__dirname, "../test-results/profiles", persistentProfile)
@@ -66,7 +67,7 @@ export async function launchAt(
   writeFileSync(join(profile, "config.json"), JSON.stringify({ serverOrigin: new URL(SERVER!).origin }));
   const app = await electron.launch({
     args: [join(__dirname, ".."), ...extraArgs],
-    env: { ...process.env, CHATTER_USER_DATA: profile },
+    env: { ...process.env, ...env, CHATTER_USER_DATA: profile },
   });
   return { app, profile };
 }

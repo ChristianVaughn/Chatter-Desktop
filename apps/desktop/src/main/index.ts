@@ -1,6 +1,8 @@
 import { app, ipcMain, Menu, session, type IpcMainInvokeEvent } from "electron";
 import { IPC, type PreloadRole } from "../shared/ipc";
 import { installDisplayMediaHandler } from "./displayMedia";
+import { engineFeatures, installEngineBridge } from "./engineBridge";
+import { engine } from "./engineHost";
 import { isServerUrl } from "./origin";
 import { installPermissionHandlers } from "./permissions";
 import { getServerOrigin, normaliseOrigin, probeServer, setServerOrigin } from "./serverStore";
@@ -27,8 +29,14 @@ function start(): void {
   app.commandLine.appendSwitch("autoplay-policy", "no-user-gesture-required");
   if (process.platform === "win32") app.setAppUserModelId(APP_ID);
 
-  app.whenReady().then(() => {
+  app.whenReady().then(async () => {
     app.userAgentFallback = `${app.userAgentFallback} ChatterDesktop/${app.getVersion()}`;
+
+    // The engine starts first so the page's first load already knows which
+    // native features it can offer.
+    engine.start();
+    installEngineBridge(getMainWindow);
+    await engine.ready(3000);
 
     installPermissionHandlers(session.defaultSession);
     installDisplayMediaHandler(session.defaultSession, getMainWindow);
@@ -43,7 +51,10 @@ function start(): void {
     });
   });
 
-  app.on("before-quit", markQuitting);
+  app.on("before-quit", () => {
+    markQuitting();
+    engine.stop();
+  });
   // The window only hides on close, so this fires on Quit alone.
   app.on("window-all-closed", () => app.quit());
 }
@@ -61,7 +72,7 @@ function registerIpc(): void {
     } else if (isServerUrl(url)) {
       role = {
         role: "remote",
-        info: { bridgeVersion: 1, appVersion: app.getVersion(), platform: process.platform, features: [] },
+        info: { bridgeVersion: 1, appVersion: app.getVersion(), platform: process.platform, features: engineFeatures() },
       };
     }
     event.returnValue = role;

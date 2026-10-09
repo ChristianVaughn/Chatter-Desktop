@@ -10,47 +10,13 @@ permissions:
   contents: read
 
 jobs:
-  desktop:
-    name: Desktop shell (${{ matrix.os }})
+  build:
+    name: Build & test (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
     strategy:
       fail-fast: false
       matrix:
         # 22.04 rather than latest so the Linux builds run on older glibc.
-        os: [windows-latest, ubuntu-22.04]
-    steps:
-      - uses: actions/checkout@v4
-
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      - run: npm ci
-      - run: npm run typecheck
-      - run: npm run build
-
-      - name: Package (unpacked)
-        run: npm run dist:dir -w apps/desktop
-        env:
-          CSC_IDENTITY_AUTO_DISCOVERY: "false"
-
-      - name: Smoke test (Linux, headless)
-        if: runner.os == 'Linux'
-        run: xvfb-run -a npm run test:e2e -w apps/desktop
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: chatter-desktop-${{ matrix.os }}
-          path: apps/desktop/dist/*-unpacked
-          retention-days: 7
-
-  native:
-    name: Native media (${{ matrix.os }})
-    runs-on: ${{ matrix.os }}
-    strategy:
-      fail-fast: false
-      matrix:
         os: [windows-latest, ubuntu-22.04]
     steps:
       - uses: actions/checkout@v4
@@ -62,13 +28,17 @@ jobs:
           components: clippy, rustfmt
 
       # The prebuilt libwebrtc ships Chromium's hermetic libc++, which needs
-      # clang 21 or newer; distro clang on 22.04 is 14.
-      - name: Install clang 21 and glib headers (Linux)
+      # clang 21 or newer; distro clang on 22.04 is 14. The engine's audio
+      # (cpal: ALSA + PulseAudio) and push-to-talk (X11 XInput2, D-Bus portal)
+      # need their headers.
+      - name: Install Linux build dependencies
         if: runner.os == 'Linux'
         run: |
           wget -qO llvm.sh https://apt.llvm.org/llvm.sh
           sudo bash llvm.sh 21
-          sudo apt-get install -y libglib2.0-dev pkg-config
+          sudo apt-get update
+          sudo apt-get install -y libglib2.0-dev pkg-config libasound2-dev libpulse-dev \
+            libx11-dev libxi-dev libdbus-1-dev xvfb
           echo "CC=clang-21" >> "$GITHUB_ENV"
           echo "CXX=clang++-21" >> "$GITHUB_ENV"
 
@@ -77,3 +47,37 @@ jobs:
       - run: cargo fmt --all --check
       - run: cargo clippy --workspace --all-targets -- -D warnings
       - run: cargo test --workspace
+      - name: Build the engine for packaging
+        run: cargo build --release -p chatter-engine
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+      - run: npm ci
+      - name: Contract matches the Chatter client
+        run: node scripts/sync-contract.mjs --check
+      - run: npm run typecheck
+      - run: npm run build
+
+      - name: Engine protocol tests (fake audio devices)
+        run: npx playwright test e2e/engine.spec.ts
+        working-directory: apps/desktop
+        env:
+          CHATTER_ENGINE_PATH: ${{ github.workspace }}/target/release/${{ runner.os == 'Windows' && 'chatter-engine.exe' || 'chatter-engine' }}
+
+      - name: Shell smoke tests (headless on Linux)
+        if: runner.os == 'Linux'
+        run: xvfb-run -a npx playwright test e2e/smoke.spec.ts
+        working-directory: apps/desktop
+
+      - name: Package (unpacked)
+        run: npm run dist:dir -w apps/desktop
+        env:
+          CSC_IDENTITY_AUTO_DISCOVERY: "false"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: chatter-desktop-${{ matrix.os }}
+          path: apps/desktop/dist/*-unpacked
+          retention-days: 7

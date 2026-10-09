@@ -9,6 +9,7 @@
     "dev": "npm run dev -w apps/desktop",
     "build": "npm run build -w apps/desktop",
     "typecheck": "npm run typecheck -w apps/desktop",
-    "dist": "npm run dist -w apps/desktop"
+    "engine": "cargo build --release -p chatter-engine",
+    "dist": "npm run engine && npm run dist -w apps/desktop"
   }
 }

@@ -10,7 +10,12 @@ files:
   - package.json
 asarUnpack:
   - resources/**
+# chatter-engine (crates/chatter-engine), built with `cargo build --release`
+# before packaging; the app looks for it in resources/bin.
 win:
+  extraResources:
+    - from: ../../target/release/chatter-engine.exe
+      to: bin/chatter-engine.exe
   target:
     - target: nsis
       arch: [x64]
@@ -24,6 +29,9 @@ nsis:
   createStartMenuShortcut: true
   shortcutName: Chatter
 linux:
+  extraResources:
+    - from: ../../target/release/chatter-engine
+      to: bin/chatter-engine
   target:
     - AppImage
     - deb
@@ -39,6 +47,8 @@ deb:
     - libnotify4
     - libxtst6
     - libnss3
+    - libasound2
+    - libpulse0
 appImage:
   artifactName: Chatter-${version}-${arch}.AppImage
 publish: null
