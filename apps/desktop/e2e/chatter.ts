@@ -98,7 +98,14 @@ export async function login(page: Page, username: string): Promise<void> {
 
 /** Quit for real (closing only hides to the tray) and wait for the process. */
 export async function quit(app: ElectronApplication): Promise<void> {
-  const exited = new Promise<void>((resolve) => app.process().once("exit", () => resolve()));
+  let child;
+  try {
+    child = app.process();
+  } catch {
+    return; // Already closed.
+  }
+  if (child.exitCode !== null || child.signalCode !== null) return;
+  const exited = new Promise<void>((resolve) => child.once("exit", () => resolve()));
   await app.evaluate(({ app }) => app.quit()).catch(() => {});
   await exited;
 }

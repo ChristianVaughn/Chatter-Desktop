@@ -29,13 +29,19 @@ const exe = process.platform === "win32" ? "chatter-engine.exe" : "chatter-engin
 /** Where the engine binary is: bundled in a packaged app, the workspace's
  *  cargo output in development, or wherever CHATTER_ENGINE_PATH says. */
 function enginePath(): string | null {
-  const candidates = [
-    process.env["CHATTER_ENGINE_PATH"],
-    app.isPackaged ? join(process.resourcesPath, "bin", exe) : undefined,
-    join(app.getAppPath(), "../../target/release", exe),
-    join(app.getAppPath(), "../../target/debug", exe),
-  ];
-  return candidates.find((p): p is string => !!p && existsSync(p)) ?? null;
+  const override = process.env["CHATTER_ENGINE_PATH"];
+  if (override) return existsSync(override) ? override : null;
+  if (app.isPackaged) {
+    const bundled = join(process.resourcesPath, "bin", exe);
+    return existsSync(bundled) ? bundled : null;
+  }
+  // In development, whichever cargo build is newest, so a stale release
+  // build never shadows the debug build you just made.
+  const builds = ["release", "debug"]
+    .map((profile) => join(app.getAppPath(), "../../target", profile, exe))
+    .filter((p) => existsSync(p))
+    .sort((a, b) => statSync(b).mtimeMs - statSync(a).mtimeMs);
+  return builds[0] ?? null;
 }
 
 /**
@@ -52,6 +58,7 @@ export class EngineHost {
   private readonly binaryListeners = new Set<BinaryListener>();
   private restarts: number[] = [];
   private stopping = false;
+  private stopped: Promise<void> | null = null;
   /** Between a crash and the restart's spawn. */
   private restarting = false;
   hello: EngineHello | null = null;
@@ -81,8 +88,18 @@ export class EngineHost {
       process.stderr.write(`[engine] ${chunk}`);
       logEngine(chunk);
     });
-    child.on("exit", (code, signal) => this.onExit(code, signal));
-    child.on("error", (err) => console.warn("[engine] failed to start:", err.message));
+    child.on("exit", (code, signal) => {
+      // A process we've already let go of (shut down, or failed to spawn).
+      if (this.child === child) this.onExit(code, signal);
+    });
+    // Writing to an engine that just died raises EPIPE here; without a
+    // listener that would be an uncaught error in the main process.
+    child.stdin.on("error", (err) => console.warn("[engine] stdin:", err.message));
+    child.on("error", (err) => {
+      console.warn("[engine] failed to start:", err.message);
+      // No "exit" follows a failed spawn; take the restart path ourselves.
+      if (this.child === child) this.onExit(null, null);
+    });
   }
 
   /** Resolves once the engine has said hello, or null if it can't start. */
@@ -109,10 +126,38 @@ export class EngineHost {
     return () => this.readyListeners.delete(listener);
   }
 
-  stop(): void {
+  /**
+   * Ask the engine to stop by closing its stdin: it then puts back what it
+   * changed (other apps' ducked volume) and exits. Killed if it hasn't
+   * within the grace period.
+   */
+  shutdown(graceMs = 1500): Promise<void> {
+    // Quitting can ask more than once (each window closing); every caller
+    // waits for the same stop.
+    this.stopped ??= this.stop(graceMs);
+    return this.stopped;
+  }
+
+  private stop(graceMs: number): Promise<void> {
     this.stopping = true;
-    this.child?.kill();
+    const child = this.child;
     this.child = null;
+    this.hello = null;
+    this.pending.forEach((w) => w.reject(new Error("engine stopped")));
+    this.pending.clear();
+    if (!child || child.exitCode !== null) return Promise.resolve();
+    return new Promise((resolve) => {
+      const timer = setTimeout(() => {
+        child.kill();
+        resolve();
+      }, graceMs);
+      // "close" rather than "exit": its last log lines are in by then.
+      child.once("close", () => {
+        clearTimeout(timer);
+        resolve();
+      });
+      child.stdin.end();
+    });
   }
 
   async request(op: string, args: Record<string, unknown> = {}): Promise<unknown> {
@@ -146,7 +191,8 @@ export class EngineHost {
     const head = Buffer.alloc(5);
     head.writeUInt32LE(payload.length + 1);
     head.writeUInt8(kind, 4);
-    this.child?.stdin.write(Buffer.concat([head, payload]));
+    const stdin = this.child?.stdin;
+    if (stdin?.writable) stdin.write(Buffer.concat([head, payload]));
   }
 
   private onData(chunk: Buffer): void {

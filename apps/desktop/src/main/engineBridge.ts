@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { PAGE_OPS } from "../shared/engine";
 import { IPC } from "../shared/ipc";
 import { engine } from "./engineHost";
-import { pageAudioStreams } from "./displayMedia";
+import { forgetAppAudio, pageAudioStreams } from "./displayMedia";
 import { currentGame, onGameChanged } from "./games";
 import { isServerUrl } from "./origin";
 import { DEFAULT_PTT_BINDING, getPrefs, getPttBinding, setPrefs, setPttBinding, type PttBindingConfig } from "./serverStore";
@@ -61,14 +61,16 @@ function captureKey(parent: BrowserWindow): Promise<string | null> {
       webPreferences: { preload: join(__dirname, "../preload/index.js"), sandbox: true, contextIsolation: true },
     });
     captureWindow = window;
-    captureResolve = (code) => {
-      captureResolve = null;
+    const settle = (code: string | null) => {
+      if (captureResolve === settle) captureResolve = null;
       resolve(code);
     };
+    captureResolve = settle;
     window.once("ready-to-show", () => window.show());
     window.on("closed", () => {
-      captureWindow = null;
-      captureResolve?.(null);
+      // Only this capture: a newer one may have replaced it already.
+      if (captureWindow === window) captureWindow = null;
+      settle(null);
     });
     void window.loadURL(shellPageUrl("keybind"));
   });
@@ -81,6 +83,8 @@ export function installEngineBridge(getWindow: () => BrowserWindow | null): void
     if (!isServerUrl(event.senderFrame?.url)) throw new Error("not allowed");
     if (typeof op !== "string" || !pageOps.has(op)) throw new Error(`unknown operation ${String(op)}`);
     const payload = args && typeof args === "object" ? (args as Record<string, unknown>) : {};
+    // The largest real request is an SDP of a few kilobytes.
+    if (JSON.stringify(payload).length > 256 * 1024) throw new Error("request too large");
     if (op === "appaudio.stop") {
       // Only a stream the page was given.
       const stream = Number(payload["stream"]);
@@ -127,7 +131,7 @@ export function installEngineBridge(getWindow: () => BrowserWindow | null): void
     }
   });
   engine.onEvent((event) => {
-    if (event.ev === "engine.lost") pageAudioStreams.clear();
+    if (event.ev === "engine.lost") forgetAppAudio();
   });
 
   ipcMain.handle(IPC.pttGet, async (event) => {
@@ -163,9 +167,13 @@ export function installEngineBridge(getWindow: () => BrowserWindow | null): void
 
 /** Everything the engine holds for a page goes when that page does. */
 export function resetEngineOnNavigation(contents: WebContents): void {
-  const reset = () => void engine.request("session.reset").catch(() => {});
-  contents.on("did-start-navigation", (details) => {
-    if (details.isMainFrame && !details.isSameDocument) reset();
-  });
+  const reset = () => {
+    forgetAppAudio();
+    void engine.request("session.reset").catch(() => {});
+  };
+  // Once a new page has actually replaced this one: a navigation that starts
+  // and never commits (a download, a 204, a blocked link) leaves the call's
+  // page, and its call, in place.
+  contents.on("did-navigate", reset);
   contents.on("render-process-gone", reset);
 }

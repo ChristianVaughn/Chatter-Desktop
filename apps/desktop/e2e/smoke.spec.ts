@@ -1,5 +1,5 @@
 import { _electron as electron, expect, test, type ElectronApplication } from "@playwright/test";
-import { mkdtempSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { quit } from "./chatter";
@@ -31,6 +31,16 @@ test("first launch asks for a server", async () => {
   // The shell API exists here and nowhere else.
   expect(await page.evaluate(() => "shellApi" in window)).toBe(true);
   expect(await page.evaluate(() => "chatterDesktop" in window)).toBe(false);
+});
+
+test("quitting stops the engine cleanly", async () => {
+  const log = join(profile, "logs", "engine.log");
+  await app.firstWindow();
+  test.skip(!existsSync(log), "build chatter-engine first");
+  await quit(app);
+  // Asked to stop, not killed: it got to put things back first.
+  const text = readFileSync(log, "utf8");
+  expect(text.slice(-2000)).toContain("chatter-engine stopped");
 });
 
 test("rejects an address that isn't a Chatter server", async () => {

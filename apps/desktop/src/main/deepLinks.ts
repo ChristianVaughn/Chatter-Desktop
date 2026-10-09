@@ -34,17 +34,31 @@ export function findDeepLink(argv: readonly string[]): string | undefined {
   return argv.find((a) => a.startsWith(`${SCHEME}://`));
 }
 
+/** A link that arrived before the window existed. */
+let pending: string | null = null;
+
+export function openPendingDeepLink(): void {
+  const link = pending;
+  pending = null;
+  if (link) void openDeepLink(link);
+}
+
 export async function openDeepLink(link: string): Promise<void> {
   const page = targetOf(link);
+  if (!page) return;
   const window = getMainWindow();
-  if (!page || !window) return;
+  if (!window) {
+    pending = link;
+    return;
+  }
   showMainWindow();
   const current = getServerOrigin();
   if (current !== page.origin) {
     const { response } = await dialog.showMessageBox(window, {
       type: "question",
       buttons: ["Switch server", "Cancel"],
-      defaultId: 0,
+      // A link can come from anywhere; switching servers takes a deliberate click.
+      defaultId: 1,
       cancelId: 1,
       title: "Open link",
       message: `Open ${page.host} in Chatter?`,

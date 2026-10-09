@@ -19,14 +19,18 @@ function canUpdate(): boolean {
   return true;
 }
 
+let listening = false;
 let started = false;
 let downloaded: string | null = null;
 
-export function startUpdater(): void {
-  if (started || !canUpdate() || !getPrefs().autoUpdate) return;
-  started = true;
+/** Shared by the background checks and "Check for updates…". */
+function init(): void {
+  if (listening) return;
+  // The setting only governs the background checks; an update someone asked
+  // for downloads and installs on quit.
   autoUpdater.autoDownload = true;
   autoUpdater.autoInstallOnAppQuit = true;
+  listening = true;
   autoUpdater.on("error", (err) => console.warn("[updater]", err.message));
   autoUpdater.on("update-downloaded", (info) => {
     downloaded = info.version;
@@ -37,8 +41,19 @@ export function startUpdater(): void {
     note.on("click", () => autoUpdater.quitAndInstall());
     note.show();
   });
-  void autoUpdater.checkForUpdates().catch(() => {});
-  setInterval(() => void autoUpdater.checkForUpdates().catch(() => {}), 6 * 60 * 60 * 1000);
+}
+
+export function startUpdater(): void {
+  if (started || !canUpdate()) return;
+  started = true;
+  const check = () => {
+    // Read each time: the setting can change while the app runs.
+    if (!getPrefs().autoUpdate) return;
+    init();
+    void autoUpdater.checkForUpdates().catch(() => {});
+  };
+  check();
+  setInterval(check, 6 * 60 * 60 * 1000);
 }
 
 /** The tray's "Check for updates…": answers either way. */
@@ -62,6 +77,7 @@ export async function checkForUpdatesNow(): Promise<void> {
     if (response === 0) autoUpdater.quitAndInstall();
     return;
   }
+  init();
   try {
     const result = await autoUpdater.checkForUpdates();
     const latest = result?.updateInfo.version;

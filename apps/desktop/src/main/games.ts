@@ -179,8 +179,13 @@ export function onGameChanged(listener: (game: string | null) => void): () => vo
 async function scan(): Promise<void> {
   const prefs = getPrefs();
   let found: string | null = null;
-  if (prefs.shareGameActivity && engine.hello) {
-    const processes = (await engine.request("processes.list").catch(() => [])) as { exe: string }[];
+  if (prefs.shareGameActivity) {
+    // While the engine restarts there's no answer: keep what we last knew
+    // rather than report that the game closed.
+    const processes = engine.hello
+      ? ((await engine.request("processes.list").catch(() => null)) as { exe: string }[] | null)
+      : null;
+    if (!processes) return;
     for (const p of processes) {
       found = gameFor(p.exe, prefs.extraGames);
       if (found) break;

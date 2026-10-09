@@ -1,6 +1,7 @@
 // Reading back what the engine's fake speakers recorded.
 
-import { readFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { dirname } from "node:path";
 
 /** Left channel of a 16-bit stereo WAV, as -1..1 floats. */
 export function readStereoWav(path: string): { left: Float32Array; rate: number } {
@@ -43,4 +44,29 @@ export function loudestWindow(samples: Float32Array, rate: number): { rms: numbe
     if (rms > best.rms) best = { rms, hz: crossings / 2 / 0.1 };
   }
   return best;
+}
+
+/** Write a mono 16-bit 48 kHz WAV of a steady tone, unless it's already there. */
+export function ensureToneWav(path: string, hz: number, seconds = 3): string {
+  if (existsSync(path)) return path;
+  const rate = 48_000;
+  const frames = rate * seconds;
+  const data = Buffer.alloc(frames * 2);
+  for (let i = 0; i < frames; i++) data.writeInt16LE(Math.round(Math.sin((2 * Math.PI * hz * i) / rate) * 0.25 * 32767), i * 2);
+  const header = Buffer.alloc(44);
+  header.write("RIFF", 0);
+  header.writeUInt32LE(36 + data.length, 4);
+  header.write("WAVEfmt ", 8);
+  header.writeUInt32LE(16, 16);
+  header.writeUInt16LE(1, 20);
+  header.writeUInt16LE(1, 22);
+  header.writeUInt32LE(rate, 24);
+  header.writeUInt32LE(rate * 2, 28);
+  header.writeUInt16LE(2, 32);
+  header.writeUInt16LE(16, 34);
+  header.write("data", 36);
+  header.writeUInt32LE(data.length, 40);
+  mkdirSync(dirname(path), { recursive: true });
+  writeFileSync(path, Buffer.concat([header, data]));
+  return path;
 }

@@ -11,14 +11,14 @@
     "build": "electron-vite build",
     "preview": "electron-vite preview",
     "typecheck": "tsc --noEmit -p tsconfig.node.json && tsc --noEmit -p tsconfig.web.json",
-    "dist": "electron-vite build && electron-builder",
-    "dist:dir": "electron-vite build && electron-builder --dir",
+    "dist": "cargo build --release -p chatter-engine && electron-vite build && electron-builder",
+    "dist:dir": "cargo build --release -p chatter-engine && electron-vite build && electron-builder --dir",
     "test:e2e": "playwright test"
   },
   "devDependencies": {
     "@playwright/test": "~1.63.0",
     "@types/node": "^22.18.0",
-    "electron": "^44.0.0",
+    "electron": "44.7.0",
     "electron-builder": "^26.14.0",
     "electron-vite": "^4.0.1",
     "typescript": "~5.9.3",
@@ -26,5 +26,7 @@
   },
   "dependencies": {
     "electron-updater": "~6.8.9"
-  }
+  },
+  "author": "Chatter contributors",
+  "homepage": "https://github.com/ChristianVaughn/Chatter-Desktop"
 }

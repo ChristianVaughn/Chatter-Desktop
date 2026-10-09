@@ -1,6 +1,10 @@
-# Chatter Desktop: architecture and roadmap
+# Chatter Desktop: architecture
 
-This document is for the Chatter maintainers, and for their agents, to review before any upstream change. The supporting evidence is in [SPIKE-RESULTS.md](SPIKE-RESULTS.md).
+This document is for the Chatter maintainers and their agents. Supporting documents:
+- [SPIKE-RESULTS.md](SPIKE-RESULTS.md): the native voice proof;
+- [ENGINE.md](ENGINE.md): the engine and its protocol;
+- [TESTING.md](TESTING.md): how it's tested;
+- [UPSTREAM-PR.md](UPSTREAM-PR.md): the changes it needs in Chatter.
 
 ## Goal
 
@@ -8,7 +12,7 @@ A proper desktop app for Chatter, comparable to Discord desktop:
 - OS integration: tray, native notifications, badge, deep links, auto-update;
 - a **native voice engine**: better noise suppression, global push-to-talk, output devices, ducking;
 - **screen share with per-app audio**;
-- later, game activity.
+- game activity.
 
 Targets: Windows and Linux. macOS is possible later.
 
@@ -34,14 +38,15 @@ Loading the user's server URL keeps all of that working unchanged. The UI update
 
 ### A narrow, capability-negotiated bridge
 
-- **What the preload exposes.** `window.chatterDesktop = { bridgeVersion, appVersion, platform, features[] }`, and only to the configured server's origin. The shell's own pages get a separate `shellApi` instead. The main process decides which a page gets from the frame URL, not from anything the page says.
+- **What the preload exposes.** `window.chatterDesktop = { bridgeVersion, appVersion, platform, features[], … }`, and only to the configured server's origin. The rest of the object depends on the features the app offers: `voiceBackend`, `pushToTalk`, `displayCapture`, `gameActivity` and `ducking`. The shell's own pages get a separate `shellApi` instead. The main process decides which a page gets from the frame URL, not from anything the page says.
 - **Version skew.** The client comes from the server but the shell is installed, so they drift apart. The client checks `features.includes("…")` before using anything, and features are only ever added, never renamed.
 - **Security.** The server is user-chosen, so the bridge never exposes:
   - files or shell access;
   - raw keystrokes;
-  - process lists.
+  - process lists;
+  - a way to start a capture.
 
-  Pickers and keybind capture are windows the shell owns.
+  Pickers, keybind capture and settings are windows the shell owns. The page reaches the engine only through an allowlist of call operations (see ENGINE.md).
 
 ### The native engine is a separate Rust executable (`chatter-engine`)
 
@@ -62,87 +67,55 @@ The engine exposes only what a browser does:
 
 The renderer keeps the single chat WebSocket. The server routes signalling by user and accepts leave/move only from the session-holding socket. Offers, answers and candidates are relayed to the engine through the renderer, so the engine never opens a socket of its own.
 
+The page's `VoicePeer` and `VoiceMediaBackend` are built in its own JavaScript world (`preload/mainWorld.ts`), so the objects the client assigns handlers to are real page objects. They talk to the engine through `window.__chatterEngine`, which goes page → preload → main process (origin and allowlist checks) → engine over stdio.
+
 ```
 Chatter-Desktop
-├─ apps/desktop            Electron shell (TypeScript, electron-vite, electron-builder)
-│   ├─ src/main            window, server picker, nav lock, permissions, tray, badge,
-│   │                      notifications, screen-capture picker, context menu
-│   ├─ src/preload         one preload; role decided by the main process
-│   ├─ src/shell-ui        server picker, capture picker, offline page
-│   └─ e2e                 Playwright (_electron) smoke tests
-├─ crates/chatter-media    facade over libwebrtc (all binding-specific code lives here)
-├─ crates/chatter-testclient  headless Chatter voice client (the spike; becomes an integration test driver)
-└─ crates/chatter-engine   (Phase 3) the engine process
+├─ apps/desktop
+│   ├─ src/main        window, server picker, nav lock, permissions, tray, badge,
+│   │                  notifications, capture picker + app audio, engine host and
+│   │                  bridge, settings, game detection, updater, deep links, autostart
+│   ├─ src/preload     one preload; role decided by the main process. mainWorld.ts is
+│   │                  the page-world bridge and voice backend
+│   ├─ src/shell-ui    server picker, capture picker, push-to-talk key capture,
+│   │                  settings, offline page
+│   ├─ src/contract    the client's bridge and media types (scripts/sync-contract.mjs)
+│   └─ e2e             Playwright: shell, engine protocol, voice, screen share, packaging
+├─ crates/chatter-engine    the media process (ENGINE.md)
+├─ crates/chatter-media     facade over libwebrtc
+├─ crates/chatter-hotkeys   system-wide push-to-talk
+├─ crates/chatter-appaudio  per-app capture and ducking
+└─ crates/chatter-testclient  headless Chatter voice client for tests
 
-Chatter (upstream), additive changes only
-└─ client/src/lib/desktop/bridge.ts   types for window.chatterDesktop (source of truth)
-└─ client/src/lib/media/types.ts      VoicePeer / VoiceMediaBackend (Phase 2)
+Chatter (fork, branch `desktop`), additive
+├─ client/src/lib/desktop/bridge.ts   window.chatterDesktop types (source of truth)
+├─ client/src/lib/media/              VoiceMediaBackend seam, browser implementation
+└─ server                             desktop connections, push, game activity, fixes
 ```
 
 ## Status
 
-| Piece | State |
-|---|---|
-| Shell: server picker, offline page, nav lock, permissions, tray and close-to-tray, single instance, native toasts with tray restore on click, unread badge (Windows overlay, Linux count), capture picker, context menu with spelling fixes, NSIS/AppImage/deb config | ✅ built; 4 Playwright tests pass against a local server |
-| Native voice spike | ✅ go. See SPIKE-RESULTS.md |
-| Windows server bug (UDP mux dies) | ✅ fixed on fork branch `fix/windows-webrtc-udp-connreset`; ready to PR upstream |
-| CI (Windows and Ubuntu: typecheck, build, package, e2e, cargo fmt/clippy/test) | written; first run happens on push |
+Every phase below is built and tested. See TESTING.md for what each test proves.
 
-## Roadmap
+| Phase | What | State |
+|---|---|---|
+| 0 | Spike: native voice against the real SFU | ✅ (SPIKE-RESULTS.md) |
+| 1 | Shell: server picker, offline page, nav lock, permissions, tray, single instance, native toasts, unread badge, capture picker, context menu, packaging | ✅ |
+| 2 | Chatter changes (fork, `desktop` branch). Server: Windows WebRTC fix, spare-tab fix, desktop-aware push. Client: bridge, media seam, voice settings applied live, Chrome 152 silent-call fix | ✅ |
+| 3 | Native voice: engine, mic pipeline (echo cancellation, noise suppression, RNNoise), mixer with spatial audio, devices, mic test, system-wide push-to-talk, crash recovery | ✅ |
+| 4 | Screen share with the shared app's audio (Windows 11+, PulseAudio/PipeWire) | ✅ |
+| 5 | Ducking, game activity, settings window, deep links, start with system, auto-update, engine log | ✅ |
 
-### Phase 2: upstream PRs to Chatter, small and in order
-
-- **PR-0 (ready):** the Windows UDP fix.
-- **PR-A (server):**
-  - **Fix `cleanup_disconnect`** (`src/backend/ws/session.rs:2561`). It tears down the user's voice and screen media when *any* of their connections closes, before checking `holds_voice_session`. So closing a spare tab cuts the audio of a call running elsewhere. This bug exists today.
-  - **Add a `client: {kind, version}` field** to the first WebSocket frame.
-  - **Make push suppression desktop- and idle-aware** (`src/backend/push.rs:327`). Today any open socket silences phone pushes, and a tray app keeps one open all day.
-- **PR-B:**
-  - `lib/desktop/bridge.ts`;
-  - push-to-talk through the bridge;
-  - Web Push reported as unsupported in desktop (Electron exposes `PushManager`, but `subscribe` fails);
-  - the Chromecast button hidden in desktop;
-  - a short "Desktop bridge & media backends" section in `AGENTS.md`.
-- **PR-C: the media seam, with no behaviour change.**
-  - `VoicePeer` / `VoiceMediaBackend` types.
-  - The current AudioContext, gain and panner code moved verbatim into `lib/media/browserVoice.ts`.
-  - `useWebRTCVoice` calls `backend.createPeer`, `acquireMic` and `attachSlot`.
-  - `useSpeakingDetection` takes a level getter.
-  - A one-line `DisplayCaptureBackend` hook in `useWebRTCScreen`.
-  - Vitest coverage with a fake backend.
-- **PR-D: fix voice settings.** Make `useVoiceSettings` a shared store. The output device, volumes and input gain are saved today but never applied.
-
-### Phase 3: native voice (behind an "Experimental native voice" toggle and a localStorage kill switch)
-
-- **Capture:** cpal capture → libwebrtc APM (AEC3/NS/AGC) → RNNoise (`nnnoiseless`) → `NativeAudioSource`.
-- **Playout:** 12 slot sinks → mixer (gain, equal-power pan, distance; drift-corrected) → cpal. The mix is fed back as the echo canceller's reference.
-- **Push-to-talk:** gated inside the engine.
-  - Windows: `WH_KEYBOARD_LL`.
-  - X11: XInput2.
-  - Wayland: the GlobalShortcuts portal.
-- **Also:** device hot-plug and a mic test.
-- **IPC:**
-  - The engine talks to the main process over a local socket.
-  - The main process bridges that to the renderer through a `MessagePort`, checking origin and schema on every message.
-  - The main-world adapter is injected by the preload, so it always ships with the matching engine.
-- **Recovery:**
-  - Engine crash: restart it and rejoin. After repeated crashes, fall back to browser voice for the session.
-  - Page reload: the existing `sessionStorage.voiceSession` auto-rejoin.
-
-### Phase 4: screen share with app audio
-
-- **Windows:** WASAPI process loopback. Include the shared app's process tree, or exclude Chatter for full-screen shares.
-- **Linux:** a PipeWire virtual sink, venmic-style, via `pipewire-rs`.
-- **Routing:** the captured audio enters the renderer through MessagePort → AudioWorklet → `MediaStreamAudioDestinationNode`. Video stays on Chromium's hardware encoder.
-
-### Phase 5: polish
-
-Ducking ("attenuation"), game activity (`sysinfo` plus an allowlist, names only), auto-update, code signing, macOS.
+**Not verified here:**
+- **Linux runtime.** It compiles and passes clippy, and the unit tests run in CI. Push-to-talk on X11 and Wayland, PulseAudio capture and ducking haven't been run on a Linux machine.
+- **macOS.** Not built. The engine's audio and peers would work, but push-to-talk and app audio have no macOS backend.
+- **Code signing.** Configuration is documented in RELEASING.md; no certificate has been used.
 
 ## Risks
 
-- **Echo for speaker users.** Once voice leaves Chromium, the engine's echo canceller only sees its own mix, not screen-share audio played by Chromium. Mitigation: an optional loopback reference; recommend headsets.
+- **Echo for speaker users.** The engine's echo canceller sees the call's mix, not screen-share audio played by Chromium. Recommend headphones. A system loopback as an extra reference is a possible follow-up.
 - **Wayland push-to-talk.** Portal shortcuts are keys only, depend on the desktop environment, and may be toggle-only.
-- **Windows 10.** It has no process loopback before build 20348.
+- **Windows 10.** It has no process loopback before build 20348, so the picker offers no audio there.
 - **Antivirus heuristics.** Unsigned executables with keyboard hooks and audio capture look suspicious. Sign both executables.
 - **Churn in LiveKit's bindings.** Mitigation: pin the version exactly and keep all binding code in `chatter-media`.
+- **Ducking after a crash.** If the engine is killed while other apps are turned down, nothing restores them. Windows resets a session's volume when the app restarts.

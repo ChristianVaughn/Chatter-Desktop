@@ -3,7 +3,7 @@ import { execFileSync, spawn } from "node:child_process";
 import { existsSync, mkdtempSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loudestWindow, readStereoWav } from "./audio";
+import { ensureToneWav, loudestWindow, readStereoWav } from "./audio";
 import { ensureLoggedIn, launchAt, quit, SERVER, storedUser } from "./chatter";
 
 // Calls through Chatter's own UI in the desktop app, against a native test
@@ -29,6 +29,7 @@ interface SlotHeard {
 }
 
 function runNativeClient(seconds: number, out: string): Promise<{ slots_heard: Record<string, SlotHeard> }> {
+  ensureToneWav(join(repoRoot, "recordings/tone-continuous.wav"), 500);
   return new Promise((resolve, reject) => {
     const child = spawn(
       bin("chatter-testclient"),

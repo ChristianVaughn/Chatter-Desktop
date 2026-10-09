@@ -1,7 +1,7 @@
 import { app, ipcMain, Menu, session, shell, type IpcMainInvokeEvent } from "electron";
 import { IPC, type PreloadRole } from "../shared/ipc";
 import { launchedAtLogin } from "./autostart";
-import { findDeepLink, openDeepLink, registerProtocol } from "./deepLinks";
+import { findDeepLink, openDeepLink, openPendingDeepLink, registerProtocol } from "./deepLinks";
 import { installDisplayMediaHandler } from "./displayMedia";
 import { engineFeatures, installEngineBridge } from "./engineBridge";
 import { engine, logsDir } from "./engineHost";
@@ -70,11 +70,20 @@ function start(): void {
 
     const link = findDeepLink(process.argv);
     if (link) void openDeepLink(link);
+    openPendingDeepLink();
   });
 
-  app.on("before-quit", () => {
+  // Quit waits for the engine to stop cleanly, so other apps it turned down
+  // get their volume back.
+  let engineStopped = false;
+  app.on("before-quit", (event) => {
     markQuitting();
-    engine.stop();
+    if (engineStopped) return;
+    event.preventDefault();
+    void engine.shutdown().then(() => {
+      engineStopped = true;
+      app.quit();
+    });
   });
   // The window only hides on close, so this fires on Quit alone.
   app.on("window-all-closed", () => app.quit());

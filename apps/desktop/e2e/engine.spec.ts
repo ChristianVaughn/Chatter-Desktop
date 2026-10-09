@@ -59,9 +59,10 @@ class Engine {
     throw new Error("timed out waiting for an engine event");
   }
 
-  stop(): Promise<void> {
+  stop(): Promise<number | null> {
     return new Promise((resolve) => {
-      this.child.once("exit", () => resolve());
+      if (this.child.exitCode !== null) return resolve(this.child.exitCode);
+      this.child.once("exit", (code) => resolve(code));
       this.child.stdin.end();
     });
   }
@@ -136,6 +137,17 @@ test.describe("chatter-engine", () => {
     await engine.request("peer.create", { peerId: "p1", iceServers: [] });
     expect((await engine.request("session.reset")).ok).toBe(true);
     expect((await engine.request("peer.createOffer", { peerId: "p1" })).ok).toBe(false);
+  });
+
+  test("closing its input stops it cleanly", async () => {
+    // How the app quits it: the engine then undoes what it changed (ducked
+    // volumes) and exits by itself, rather than being killed.
+    await engine.waitFor((m) => m.ev === "hello");
+    await engine.request("ducking.set", { amount: 0.5 });
+    await engine.request("mic.open", { micId: "m1", options });
+    const started = Date.now();
+    expect(await engine.stop()).toBe(0);
+    expect(Date.now() - started).toBeLessThan(1500);
   });
 
   test("push-to-talk reports the bound key, system-wide", async () => {

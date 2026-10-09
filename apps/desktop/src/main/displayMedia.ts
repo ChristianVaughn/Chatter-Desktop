@@ -24,6 +24,13 @@ let unclaimedAudio: number | null = null;
 /** Streams the page owns; their audio frames are forwarded to it. */
 export const pageAudioStreams = new Set<number>();
 
+/** The page went away or the engine restarted (its captures went with it,
+ *  and stream ids start over): nothing is waiting to be collected. */
+export function forgetAppAudio(): void {
+  unclaimedAudio = null;
+  pageAudioStreams.clear();
+}
+
 function toCaptureSource(s: DesktopCapturerSource): CaptureSource {
   return {
     id: s.id,

@@ -6,11 +6,15 @@ import { isServerUrl, isSignInUrl, isWebUrl } from "./origin";
  * place (they redirect back); every other link opens in the system browser.
  */
 export function attachNavigationLock(contents: WebContents): void {
-  contents.on("will-navigate", (event, url) => {
-    if (isServerUrl(url) || isSignInUrl(url)) return;
+  const guard = (event: { preventDefault(): void }, url: string, isMainFrame: boolean) => {
+    if (!isMainFrame || isServerUrl(url) || isSignInUrl(url)) return;
     event.preventDefault();
     if (isWebUrl(url)) void shell.openExternal(url);
-  });
+  };
+  contents.on("will-navigate", (event, url) => guard(event, url, event.isMainFrame));
+  // A redirect could otherwise carry the window off the server, with no
+  // address bar to show where it went.
+  contents.on("will-redirect", (event, url) => guard(event, url, event.isMainFrame));
 
   contents.setWindowOpenHandler(({ url }) => {
     if (isServerUrl(url)) {

@@ -2,6 +2,8 @@
 
 The desktop app's native media process (`crates/chatter-engine`). The app starts it before the window opens, talks to it over stdin/stdout, and restarts it if it crashes. It logs to stderr; the app copies that to `<profile>/logs/engine.log`.
 
+To stop it, the app closes its stdin. The engine then puts back what it changed (other apps' ducked volume) and exits; the app kills it only if that takes more than 1.5 s. In development the app runs whichever of `target/release` and `target/debug` was built last.
+
 ## What it does
 
 | Area | Module | Notes |

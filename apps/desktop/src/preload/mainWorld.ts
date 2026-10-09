@@ -136,12 +136,21 @@ export function installDesktopBridge(base: BridgeBase): void {
       );
     }
 
-    run<T>(op: () => Promise<T>): Promise<T> {
+    /**
+     * Queue an operation behind the earlier ones. A structural one (building
+     * the connection or negotiating it) that the engine couldn't do leaves the
+     * connection unusable: say so the way a browser connection would, so the
+     * client's retries take over. A stray candidate or a stats call failing
+     * just fails.
+     */
+    run<T>(op: () => Promise<T>, structural = true): Promise<T> {
       const next = this.queue.then(op, op);
-      // An operation the engine couldn't do leaves this connection unusable;
-      // say so the way a browser connection would, so the client's retries
-      // take over.
-      this.queue = next.catch((err) => this.fail(err));
+      this.queue = next.then(
+        () => {},
+        (err) => {
+          if (structural) this.fail(err);
+        },
+      );
       return next;
     }
 
@@ -155,7 +164,7 @@ export function installDesktopBridge(base: BridgeBase): void {
     addTransceiver(_kind: "audio", _init: { direction: "recvonly" }): unknown {
       const transceiver = { index: this.transceivers.length };
       this.transceivers.push(transceiver);
-      void this.run(() => engine!.request("peer.addRecvOnlyAudio", { peerId: this.peerId }));
+      void this.run(() => engine!.request("peer.addRecvOnlyAudio", { peerId: this.peerId })).catch(() => {});
       return transceiver;
     }
 
@@ -167,13 +176,13 @@ export function installDesktopBridge(base: BridgeBase): void {
       void this.run(async () => {
         await mic.ensureOpen();
         await engine!.request("peer.attachMic", { peerId: this.peerId, micId: mic.micId });
-      });
+      }).catch(() => {});
       this.senders.push({
         track: { kind: "audio" },
         getParameters: () => ({ encodings: [{}] }) as unknown as RTCRtpSendParameters,
         setParameters: async (parameters) => {
           const bps = parameters.encodings?.[0]?.maxBitrate;
-          if (bps) await this.run(() => engine!.request("peer.setMaxBitrate", { peerId: this.peerId, bps }));
+          if (bps) await this.run(() => engine!.request("peer.setMaxBitrate", { peerId: this.peerId, bps }), false);
         },
       });
     }
@@ -204,15 +213,16 @@ export function installDesktopBridge(base: BridgeBase): void {
           sdpMid: c.sdpMid ?? "0",
           sdpMLineIndex: c.sdpMLineIndex ?? 0,
         }),
+        false,
       );
     }
 
     restartIce(): void {
-      void this.run(() => engine!.request("peer.restartIce", { peerId: this.peerId }));
+      void this.run(() => engine!.request("peer.restartIce", { peerId: this.peerId }), false).catch(() => {});
     }
 
     async getStats(): Promise<VoiceStatsReport> {
-      const reports = (await this.run(() => engine!.request("peer.getStats", { peerId: this.peerId }))) as unknown[];
+      const reports = (await this.run(() => engine!.request("peer.getStats", { peerId: this.peerId }), false)) as unknown[];
       return { forEach: (cb) => (reports ?? []).forEach(cb) };
     }
 
@@ -221,7 +231,7 @@ export function installDesktopBridge(base: BridgeBase): void {
       this.closed = true;
       this.connectionState = "closed";
       this.unsubscribe.forEach((u) => u());
-      void this.run(() => engine!.request("peer.close", { peerId: this.peerId }));
+      void this.run(() => engine!.request("peer.close", { peerId: this.peerId }), false).catch(() => {});
     }
   }
 
@@ -315,7 +325,12 @@ export function installDesktopBridge(base: BridgeBase): void {
     onDevicesChanged: (listener) => on("devices.changed", () => listener()),
     startMicTest: async (options, onLevel): Promise<MicTest> => {
       const off = on("test.level", (e) => onLevel(e.level as number));
-      await engine.request("test.start", { options, outputDeviceId: options.outputDeviceId });
+      try {
+        await engine.request("test.start", { options, outputDeviceId: options.outputDeviceId });
+      } catch (err) {
+        off();
+        throw err;
+      }
       return {
         setMonitoring: async (on) => void (await engine.request("test.monitor", { on })),
         setGain: (gain) => fire("test.gain", { gain }),
@@ -374,6 +389,9 @@ export function installDesktopBridge(base: BridgeBase): void {
     const url = URL.createObjectURL(new Blob([workletSource], { type: "text/javascript" }));
     try {
       await ctx.audioWorklet.addModule(url);
+    } catch (err) {
+      void ctx.close();
+      throw err;
     } finally {
       URL.revokeObjectURL(url);
     }
@@ -404,7 +422,15 @@ export function installDesktopBridge(base: BridgeBase): void {
       const stream = await navigator.mediaDevices.getDisplayMedia({ ...options, audio: false });
       const audioStream = await engine.appAudioClaim().catch(() => null);
       if (audioStream === null) return stream;
-      const track = await appAudioTrack(audioStream);
+      let track: MediaStreamTrack;
+      try {
+        track = await appAudioTrack(audioStream);
+      } catch (err) {
+        // No half a share: stop the picture and the capture behind it.
+        stream.getTracks().forEach((t) => t.stop());
+        fire("appaudio.stop", { stream: audioStream });
+        throw err;
+      }
       stream.addTrack(track);
       // The video ending (the OS's "stop sharing") ends the audio with it.
       stream.getVideoTracks()[0]?.addEventListener("ended", () => track.stop());
