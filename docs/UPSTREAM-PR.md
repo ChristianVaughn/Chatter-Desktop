@@ -6,11 +6,18 @@ The description for the one pull request from `ChristianVaughn/Chatter` branch `
 
 ## Desktop app support, plus four bugs it turned up
 
-This makes Chatter ready for [Chatter Desktop](https://github.com/ChristianVaughn/Chatter-Desktop), a Windows and Linux app. Like Discord's app, it opens your Chatter server's own UI in a window. It adds a native voice engine, system-wide push-to-talk, screen share with an app's audio, lowering other apps while people talk, and "Playing …" from the game you have open.
+This makes Chatter ready for [Chatter Desktop](https://github.com/ChristianVaughn/Chatter-Desktop), a desktop app for Windows and Linux. Like Discord's app, it opens your Chatter server's own UI in a window, so the interface is always whatever the server serves. On top of that it adds what a browser tab can't do:
 
-**In a browser nothing changes.** Every desktop path is switched on by `window.chatterDesktop`, which only the desktop app defines, and then only for each feature the app says it has. The client's protocol, signalling, retries and SDP handling stay where they are. The desktop app supplies media, the way a browser does.
+- **A native voice engine:** Google's libwebrtc in a separate Rust process. It brings stronger noise suppression (RNNoise), echo cancellation and a choice of output device.
+- **System-wide push-to-talk:** works while a game has focus.
+- **Screen share with one app's audio:** for example a game's sound, without the call being sent back into itself.
+- **"Lower Other Apps":** turns games and music down while people talk.
+- **"Playing …" status:** from the game you have open.
+- **Desktop basics:** tray, native notifications, unread badge, `chatter://` links, automatic updates.
 
-Building it turned up four bugs that affect everyone today. They're fixed in their own commits, so they can be taken without the rest:
+**In a browser nothing changes.** Every desktop path is switched on by `window.chatterDesktop`, which only the desktop app defines, and then only for each feature the app says it has. Chatter's protocol, signalling, retries and SDP handling all stay in the client. The desktop app only supplies media, the way a browser does.
+
+Building it turned up four bugs that affect everyone today. Each is fixed in its own commit, so you can take them without the rest:
 
 | Bug | Who it hits |
 |---|---|
@@ -18,6 +25,40 @@ Building it turned up four bugs that affect everyone today. They're fixed in the
 | Closing a spare tab cuts your audio in a call you're in elsewhere | anyone with two tabs open |
 | Calls are silent on Chrome 152 | current Chrome and Edge |
 | Voice settings (output device, volumes, input gain) are saved but never applied | everyone |
+
+### Could you test it on Linux?
+
+I don't have a Linux machine, so everything below was tested on Windows 11. The Linux build compiles and has unit tests, and the Chatter-Desktop repo's GitHub Actions builds and tests it on Ubuntu 22.04. Nobody has used it on a real Linux desktop yet, and you're the best person to do that.
+
+**1. Get the app.** Open the latest [Actions run](https://github.com/ChristianVaughn/Chatter-Desktop/actions) and download the `chatter-desktop-linux` artifact. Then either:
+
+```bash
+sudo apt install ./chatter-desktop_*_amd64.deb
+```
+
+or, on any distro:
+
+```bash
+chmod +x Chatter-*.AppImage && ./Chatter-*.AppImage
+```
+
+The AppImage needs `libfuse2` on some distros. To build it yourself instead, see the Chatter-Desktop README.
+
+**2. Run a server from this branch.** The desktop features need this PR's client. Run it locally (`cargo run` after `cd client && npm run build`) or put it on a test instance, then point the app at it on first launch.
+
+**3. Try these, and tell me what breaks:**
+
+- [ ] **Sign in:** it stays signed in after quitting and reopening.
+- [ ] **Native voice:** in Voice & Audio, check "Native Voice Engine" is on (it applies from your next call). Then, in a call with someone in a browser, both of you should hear each other. Noise suppression should also offer "Enhanced".
+- [ ] **Push-to-talk outside the window:** turn on Push to Talk in Voice & Audio and choose a Push to Talk Key. Then switch to another app and hold the key.
+  - On X11 it should just work.
+  - On Wayland your desktop should show its own dialog to confirm the shortcut. This needs the GlobalShortcuts portal (KDE, Hyprland, GNOME 48+).
+- [ ] **Screen share with app audio:** share a window while something plays sound. In the picker, choose that app under Audio. The viewer should hear it, but not the call.
+- [ ] **"Lower Other Apps":** under Voice & Audio → Output, set it to about 80% and play music. The music should drop while someone talks and come back after.
+- [ ] **"Playing …":** open a game and your status should show it. For a game it doesn't recognise, open the app's own Settings (tray menu) and use "Add a running program…".
+- [ ] **Notifications:** close the window to the tray, have someone message you, and a desktop notification appears. Clicking it brings the window back.
+
+If something fails, the logs folder has `engine.log`, which is the most useful thing to send. To open it, press Alt to show the menu bar, then choose Help → "Open logs folder".
 
 ### Commits
 
@@ -63,7 +104,7 @@ It's based on the current `main` (`b2a1a6a`). Every commit compiles (`cargo chec
     - The browser mic's gain stage no longer sends silence when its audio context starts suspended.
     - Overlapping mic switches settle on the last one.
 
-### How it was tested
+### How it was tested (Windows 11)
 
 - **Client:**
   - `npx vitest run`: 463 passed (39 files).
@@ -75,22 +116,21 @@ It's based on the current `main` (`b2a1a6a`). Every commit compiles (`cargo chec
   - `cargo test --test ws_contract` also fails on `main`: its helpers predate two-step TOTP registration.
 - **End to end** (19 tests, Playwright driving the desktop app against a local server built from this branch):
   - browser voice audible both ways;
-  - native voice both ways;
+  - native voice both ways, including "Lower Other Apps";
   - a call surviving the voice engine being killed;
-  - screen share carrying a chosen app's tone;
+  - screen share carrying a chosen app's audio;
   - system-wide push-to-talk;
   - deep links and the packaged installer.
 - **Headless native clients:**
-  - "spare tab" (commit 2): a third connection for a caller opens and closes mid-call, and the other side hears the caller throughout.
+  - "Spare tab" (commit 2): a third connection for a caller opens and closes mid-call, and the other side hears the caller throughout.
   - Game activity (commit 8) reached another user's presence.
-- **Not yet run on Linux:** the desktop app's Linux build compiles and its tests pass in CI, but nobody has run it on a Linux desktop yet.
 
 ### Notes for agents working on Chatter
 
 `AGENTS.md` has a new **Desktop App** section with the rules. In short:
 
 - **Keep voice media behind `VoiceMediaBackend`.** Don't call `new RTCPeerConnection`, `getUserMedia` or Web Audio for voice from the hook. Add to `lib/media/types.ts` and implement in `browserVoice.ts`; the desktop app implements the same interface.
-- **Treat `lib/desktop/bridge.ts` as a contract.** The desktop app vendors it. Add, don't change: new optional members, new feature strings, and versioned getters (`voiceBackend(1)`).
+- **Treat `lib/desktop/bridge.ts` as a contract.** The desktop app vendors it. Change it additively only: new optional members, new feature strings, versioned getters (`voiceBackend(1)`).
 - **Check features before using them.** Gate on `hasDesktopFeature("…")`, never on `desktop` existing.
 
 ### Review hot spots
